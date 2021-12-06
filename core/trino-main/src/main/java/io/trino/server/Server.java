@@ -20,6 +20,7 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.TypeLiteral;
+import com.google.inject.spi.Message;
 import com.google.inject.util.Types;
 import io.airlift.bootstrap.ApplicationConfigurationException;
 import io.airlift.bootstrap.Bootstrap;
@@ -71,15 +72,12 @@ import static io.trino.server.TrinoSystemRequirements.verifySystemTimeIsReasonab
 import static java.lang.String.format;
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 
-public class Server
-{
-    public final void start(String trinoVersion)
-    {
+public class Server {
+    public final void start(String trinoVersion) {
         new EmbedVersion(trinoVersion).embedVersion(() -> doStart(trinoVersion)).run();
     }
 
-    private void doStart(String trinoVersion)
-    {
+    private void doStart(String trinoVersion) {
         verifyJvmRequirements();
         verifySystemTimeIsReasonable();
 
@@ -114,8 +112,9 @@ public class Server
         Bootstrap app = new Bootstrap(modules.build());
 
         try {
-            Injector injector = app.initialize();
 
+
+            Injector injector = app.initialize();
             log.info("Trino version: %s", injector.getInstance(NodeVersion.class).getVersion());
             logLocation(log, "Working directory", Paths.get("."));
             logLocation(log, "Etc directory", Paths.get("etc"));
@@ -143,8 +142,7 @@ public class Server
             injector.getInstance(ServerInfoResource.class).startupComplete();
 
             log.info("======== SERVER STARTED ========");
-        }
-        catch (ApplicationConfigurationException e) {
+        } catch (ApplicationConfigurationException e) {
             StringBuilder message = new StringBuilder();
             message.append("Configuration is invalid\n");
             message.append("==========\n");
@@ -154,21 +152,18 @@ public class Server
             message.append("==========");
             log.error(message.toString());
             System.exit(1);
-        }
-        catch (Throwable e) {
+        } catch (Throwable e) {
             log.error(e);
             System.exit(1);
         }
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> Key<Optional<T>> optionalKey(Class<T> type)
-    {
+    private static <T> Key<Optional<T>> optionalKey(Class<T> type) {
         return Key.get((TypeLiteral<Optional<T>>) TypeLiteral.get(Types.newParameterizedType(Optional.class, type)));
     }
 
-    private static void addMessages(StringBuilder output, String type, List<Object> messages)
-    {
+    private static void addMessages(StringBuilder output, String type, List<Object> messages) {
         if (messages.isEmpty()) {
             return;
         }
@@ -178,13 +173,11 @@ public class Server
         }
     }
 
-    protected Iterable<? extends Module> getAdditionalModules()
-    {
+    protected Iterable<? extends Module> getAdditionalModules() {
         return ImmutableList.of();
     }
 
-    private static void updateConnectorIds(Announcer announcer, CatalogManager metadata)
-    {
+    private static void updateConnectorIds(Announcer announcer, CatalogManager metadata) {
         // get existing announcement
         ServiceAnnouncement announcement = getTrinoAnnouncement(announcer.getServiceAnnouncements());
 
@@ -204,8 +197,7 @@ public class Server
         announcer.addServiceAnnouncement(builder.build());
     }
 
-    private static ServiceAnnouncement getTrinoAnnouncement(Set<ServiceAnnouncement> announcements)
-    {
+    private static ServiceAnnouncement getTrinoAnnouncement(Set<ServiceAnnouncement> announcements) {
         for (ServiceAnnouncement announcement : announcements) {
             if (announcement.getType().equals("trino")) {
                 return announcement;
@@ -214,16 +206,14 @@ public class Server
         throw new IllegalArgumentException("Trino announcement not found: " + announcements);
     }
 
-    private static void logLocation(Logger log, String name, Path path)
-    {
+    private static void logLocation(Logger log, String name, Path path) {
         if (!Files.exists(path, NOFOLLOW_LINKS)) {
             log.info("%s: [does not exist]", name);
             return;
         }
         try {
             path = path.toAbsolutePath().toRealPath();
-        }
-        catch (IOException e) {
+        } catch (IOException e) {
             log.info("%s: [not accessible]", name);
             return;
         }

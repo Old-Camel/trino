@@ -13,6 +13,7 @@
     <name>trino-main</name>
 
     <properties>
+        <air.check.skip-enforcer>true</air.check.skip-enforcer>
         <air.main.basedir>${project.parent.basedir}</air.main.basedir>
     </properties>
 
@@ -318,18 +319,23 @@
             <groupId>org.weakref</groupId>
             <artifactId>jmxutils</artifactId>
         </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>fastjson</artifactId>
+            <version>1.2.78</version>
+        </dependency>
 
         <!-- used by tests but also needed transitively -->
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>okhttp</artifactId>
-            <scope>runtime</scope>
+<!--            <scope>runtime</scope>-->
         </dependency>
 
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>okhttp-urlconnection</artifactId>
-            <scope>runtime</scope>
+<!--            <scope>runtime</scope>-->
         </dependency>
 
         <dependency>
