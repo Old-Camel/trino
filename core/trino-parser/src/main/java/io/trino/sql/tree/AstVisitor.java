@@ -717,6 +717,11 @@ public abstract class AstVisitor<R, C>
         return visitNode(node, context);
     }
 
+    protected R visitTruncateTable(TruncateTable node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
     protected R visitStartTransaction(StartTransaction node, C context)
     {
         return visitStatement(node, context);
@@ -748,6 +753,11 @@ public abstract class AstVisitor<R, C>
     }
 
     protected R visitGrant(Grant node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitDeny(Deny node, C context)
     {
         return visitStatement(node, context);
     }
@@ -1065,5 +1075,10 @@ public abstract class AstVisitor<R, C>
     protected R visitRangeQuantifier(RangeQuantifier node, C context)
     {
         return visitPatternQuantifier(node, context);
+    }
+
+    protected R visitQueryPeriod(QueryPeriod node, C context)
+    {
+        return visitNode(node, context);
     }
 }

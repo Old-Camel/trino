@@ -19,6 +19,7 @@ import com.google.common.collect.Ordering;
 import io.trino.Session;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import io.trino.sql.analyzer.TypeSignatureProvider;
 import io.trino.sql.tree.QualifiedName;
 
@@ -41,14 +42,17 @@ import static io.trino.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypeSignatures;
 import static io.trino.type.UnknownType.UNKNOWN;
 import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 
 public class FunctionResolver
 {
     private final Metadata metadata;
+    private final TypeManager typeManager;
 
-    public FunctionResolver(Metadata metadata)
+    public FunctionResolver(Metadata metadata, TypeManager typeManager)
     {
-        this.metadata = metadata;
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
     FunctionBinding resolveCoercion(Session session, Collection<FunctionMetadata> allCandidates, Signature signature)
@@ -77,7 +81,7 @@ public class FunctionResolver
 
     private boolean canBindSignature(Session session, Signature declaredSignature, Signature actualSignature)
     {
-        return new SignatureBinder(session, metadata, declaredSignature, false)
+        return new SignatureBinder(session, metadata, typeManager, declaredSignature, false)
                 .canBind(fromTypeSignatures(actualSignature.getArgumentTypes()), actualSignature.getReturnType());
     }
 
@@ -85,9 +89,9 @@ public class FunctionResolver
     {
         BoundSignature boundSignature = new BoundSignature(
                 signature.getName(),
-                metadata.getType(signature.getReturnType()),
+                typeManager.getType(signature.getReturnType()),
                 signature.getArgumentTypes().stream()
-                        .map(metadata::getType)
+                        .map(typeManager::getType)
                         .collect(toImmutableList()));
         return SignatureBinder.bindFunction(
                 functionMetadata.getFunctionId(),
@@ -140,10 +144,9 @@ public class FunctionResolver
 
         List<String> expectedParameters = new ArrayList<>();
         for (FunctionMetadata function : allCandidates) {
-            expectedParameters.add(format("%s(%s) %s",
-                    name,
-                    Joiner.on(", ").join(function.getSignature().getArgumentTypes()),
-                    Joiner.on(", ").join(function.getSignature().getTypeVariableConstraints())));
+            String arguments = Joiner.on(", ").join(function.getSignature().getArgumentTypes());
+            String constraints = Joiner.on(", ").join(function.getSignature().getTypeVariableConstraints());
+            expectedParameters.add(format("%s(%s) %s", name, arguments, constraints).stripTrailing());
         }
 
         String parameters = Joiner.on(", ").join(parameterTypes);
@@ -194,7 +197,7 @@ public class FunctionResolver
     {
         ImmutableList.Builder<ApplicableFunction> applicableFunctions = ImmutableList.builder();
         for (FunctionMetadata function : candidates) {
-            new SignatureBinder(session, metadata, function.getSignature(), allowCoercion)
+            new SignatureBinder(session, metadata, typeManager, function.getSignature(), allowCoercion)
                     .bind(actualParameters)
                     .ifPresent(signature -> applicableFunctions.add(new ApplicableFunction(function, signature)));
         }
@@ -278,14 +281,14 @@ public class FunctionResolver
     private List<ApplicableFunction> getUnknownOnlyCastFunctions(List<ApplicableFunction> applicableFunction, List<Type> actualParameters)
     {
         return applicableFunction.stream()
-                .filter((function) -> onlyCastsUnknown(function, actualParameters))
+                .filter(function -> onlyCastsUnknown(function, actualParameters))
                 .collect(toImmutableList());
     }
 
     private boolean onlyCastsUnknown(ApplicableFunction applicableFunction, List<Type> actualParameters)
     {
         List<Type> boundTypes = applicableFunction.getBoundSignature().getArgumentTypes().stream()
-                .map(metadata::getType)
+                .map(typeManager::getType)
                 .collect(toImmutableList());
         checkState(actualParameters.size() == boundTypes.size(), "type lists are of different lengths");
         for (int i = 0; i < actualParameters.size(); i++) {
@@ -299,7 +302,7 @@ public class FunctionResolver
     private boolean returnTypeIsTheSame(List<ApplicableFunction> applicableFunctions)
     {
         Set<Type> returnTypes = applicableFunctions.stream()
-                .map(function -> metadata.getType(function.getBoundSignature().getReturnType()))
+                .map(function -> typeManager.getType(function.getBoundSignature().getReturnType()))
                 .collect(Collectors.toSet());
         return returnTypes.size() == 1;
     }
@@ -318,10 +321,10 @@ public class FunctionResolver
             return true;
         }
 
-        List<FunctionArgumentDefinition> argumentDefinitions = function.getArgumentDefinitions();
+        FunctionNullability functionNullability = function.getFunctionNullability();
         for (int i = 0; i < parameterTypes.size(); i++) {
             // if the argument value will always be null and the function argument is not nullable, the function will always return null
-            if (parameterTypes.get(i).equals(UNKNOWN) && !argumentDefinitions.get(i).isNullable()) {
+            if (parameterTypes.get(i).equals(UNKNOWN) && !functionNullability.isArgumentNullable(i)) {
                 return true;
             }
         }
@@ -335,7 +338,7 @@ public class FunctionResolver
             if (typeSignatureProvider.hasDependency()) {
                 return Optional.empty();
             }
-            resultBuilder.add(metadata.getType(typeSignatureProvider.getTypeSignature()));
+            resultBuilder.add(typeManager.getType(typeSignatureProvider.getTypeSignature()));
         }
         return Optional.of(resultBuilder.build());
     }
@@ -346,7 +349,7 @@ public class FunctionResolver
     private boolean isMoreSpecificThan(Session session, ApplicableFunction left, ApplicableFunction right)
     {
         List<TypeSignatureProvider> resolvedTypes = fromTypeSignatures(left.getBoundSignature().getArgumentTypes());
-        return new SignatureBinder(session, metadata, right.getDeclaredSignature(), true)
+        return new SignatureBinder(session, metadata, typeManager, right.getDeclaredSignature(), true)
                 .canBind(resolvedTypes);
     }
 

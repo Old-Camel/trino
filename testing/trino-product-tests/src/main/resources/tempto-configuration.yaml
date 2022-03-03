@@ -4,9 +4,6 @@ hdfs:
     uri: http://${databases.hive.host}:50070
 
 databases:
-  default:
-    alias: presto
-
   hive:
     host: hadoop-master
     jdbc_driver_class: org.apache.hive.jdbc.HiveDriver
@@ -137,7 +134,7 @@ databases:
 
   sqlserver:
     jdbc_driver_class: com.microsoft.sqlserver.jdbc.SQLServerDriver
-    jdbc_url: jdbc:sqlserver://sqlserver
+    jdbc_url: jdbc:sqlserver://sqlserver;encrypt=false
     jdbc_user: sa
     jdbc_password: SQLServerPass1
     jdbc_pooling: true

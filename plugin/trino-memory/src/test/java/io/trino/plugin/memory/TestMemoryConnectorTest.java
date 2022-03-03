@@ -40,10 +40,10 @@ import org.testng.annotations.Test;
 import java.util.List;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.FeaturesConfig.JoinDistributionType;
+import static io.trino.FeaturesConfig.JoinDistributionType.BROADCAST;
 import static io.trino.SystemSessionProperties.ENABLE_LARGE_DYNAMIC_FILTERS;
 import static io.trino.plugin.memory.MemoryQueryRunner.createMemoryQueryRunner;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType.BROADCAST;
 import static io.trino.testing.assertions.Assert.assertEquals;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -74,7 +74,7 @@ public class TestMemoryConnectorTest
                         .put("dynamic-filtering.large-partitioned.range-row-limit-per-driver", "100000")
                         // disable semi join to inner join rewrite to test semi join operators explicitly
                         .put("optimizer.rewrite-filtering-semi-join-to-inner-join", "false")
-                        .build(),
+                        .buildOrThrow(),
                 ImmutableSet.<TpchTable<?>>builder()
                         .addAll(REQUIRED_TPCH_TABLES)
                         .add(TpchTable.PART)
@@ -106,6 +106,9 @@ public class TestMemoryConnectorTest
 
             case SUPPORTS_CREATE_VIEW:
                 return true;
+
+            case SUPPORTS_NOT_NULL_CONSTRAINT:
+                return false;
 
             default:
                 return super.hasBehavior(connectorBehavior);
@@ -151,7 +154,7 @@ public class TestMemoryConnectorTest
         Metrics metrics = collectCustomMetrics("SELECT partkey FROM part WHERE partkey % 1000 > 0");
         assertThat(metrics.getMetrics().get("rows")).isEqualTo(new LongCount(PART_COUNT));
         assertThat(metrics.getMetrics().get("started")).isEqualTo(metrics.getMetrics().get("finished"));
-        assertThat(((Count) metrics.getMetrics().get("finished")).getTotal()).isGreaterThan(0);
+        assertThat(((Count<?>) metrics.getMetrics().get("finished")).getTotal()).isGreaterThan(0);
     }
 
     @Test
@@ -161,7 +164,23 @@ public class TestMemoryConnectorTest
         Metrics metrics = collectCustomMetrics("SELECT partkey FROM part");
         assertThat(metrics.getMetrics().get("rows")).isEqualTo(new LongCount(PART_COUNT));
         assertThat(metrics.getMetrics().get("started")).isEqualTo(metrics.getMetrics().get("finished"));
-        assertThat(((Count) metrics.getMetrics().get("finished")).getTotal()).isGreaterThan(0);
+        assertThat(((Count<?>) metrics.getMetrics().get("finished")).getTotal()).isGreaterThan(0);
+    }
+
+    @Test
+    public void testExplainCustomMetricsScanOnly()
+    {
+        assertExplainAnalyze(
+                "EXPLAIN ANALYZE VERBOSE SELECT partkey FROM part",
+                "'rows' = LongCount\\{total=2000}");
+    }
+
+    @Test
+    public void testExplainCustomMetricsScanFilter()
+    {
+        assertExplainAnalyze(
+                "EXPLAIN ANALYZE VERBOSE SELECT partkey FROM part WHERE partkey % 1000 > 0",
+                "'rows' = LongCount\\{total=2000}");
     }
 
     private Metrics collectCustomMetrics(String sql)
@@ -338,7 +357,6 @@ public class TestMemoryConnectorTest
     }
 
     @Test
-    @Flaky(issue = "https://github.com/trinodb/trino/issues/5172", match = "Lists differ at element")
     public void testCrossJoinDynamicFiltering()
     {
         assertUpdate("DROP TABLE IF EXISTS probe");
@@ -538,7 +556,7 @@ public class TestMemoryConnectorTest
         assertUpdate("CREATE OR REPLACE VIEW test_view AS " + query);
 
         assertQueryFails("CREATE TABLE test_view (x date)", "View \\[default.test_view] already exists");
-        assertQueryFails("CREATE VIEW test_view AS SELECT 123 x", "View already exists: default.test_view");
+        assertQueryFails("CREATE VIEW test_view AS SELECT 123 x", ".*View already exists: 'memory.default.test_view'");
 
         assertQuery("SELECT * FROM test_view", query);
 

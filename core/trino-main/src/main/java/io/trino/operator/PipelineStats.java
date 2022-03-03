@@ -27,7 +27,6 @@ import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
@@ -56,7 +55,6 @@ public class PipelineStats
 
     private final DataSize userMemoryReservation;
     private final DataSize revocableMemoryReservation;
-    private final DataSize systemMemoryReservation;
 
     private final DistributionSnapshot queuedTime;
     private final DistributionSnapshot elapsedTime;
@@ -111,7 +109,6 @@ public class PipelineStats
 
             @JsonProperty("userMemoryReservation") DataSize userMemoryReservation,
             @JsonProperty("revocableMemoryReservation") DataSize revocableMemoryReservation,
-            @JsonProperty("systemMemoryReservation") DataSize systemMemoryReservation,
 
             @JsonProperty("queuedTime") DistributionSnapshot queuedTime,
             @JsonProperty("elapsedTime") DistributionSnapshot elapsedTime,
@@ -173,7 +170,6 @@ public class PipelineStats
 
         this.userMemoryReservation = requireNonNull(userMemoryReservation, "userMemoryReservation is null");
         this.revocableMemoryReservation = requireNonNull(revocableMemoryReservation, "revocableMemoryReservation is null");
-        this.systemMemoryReservation = requireNonNull(systemMemoryReservation, "systemMemoryReservation is null");
 
         this.queuedTime = requireNonNull(queuedTime, "queuedTime is null");
         this.elapsedTime = requireNonNull(elapsedTime, "elapsedTime is null");
@@ -314,12 +310,6 @@ public class PipelineStats
     public DataSize getRevocableMemoryReservation()
     {
         return revocableMemoryReservation;
-    }
-
-    @JsonProperty
-    public DataSize getSystemMemoryReservation()
-    {
-        return systemMemoryReservation;
     }
 
     @JsonProperty
@@ -468,7 +458,6 @@ public class PipelineStats
                 completedDrivers,
                 userMemoryReservation,
                 revocableMemoryReservation,
-                systemMemoryReservation,
                 queuedTime,
                 elapsedTime,
                 totalScheduledTime,
@@ -488,9 +477,17 @@ public class PipelineStats
                 outputDataSize,
                 outputPositions,
                 physicalWrittenDataSize,
-                operatorSummaries.stream()
-                        .map(OperatorStats::summarize)
-                        .collect(Collectors.toList()),
+                summarizeOperatorStats(operatorSummaries),
                 ImmutableList.of());
+    }
+
+    private static List<OperatorStats> summarizeOperatorStats(List<OperatorStats> operatorSummaries)
+    {
+        // Use an exact size ImmutableList builder to avoid a redundant copy in the PipelineStats constructor
+        ImmutableList.Builder<OperatorStats> results = ImmutableList.builderWithExpectedSize(operatorSummaries.size());
+        for (OperatorStats operatorStats : operatorSummaries) {
+            results.add(operatorStats.summarize());
+        }
+        return results.build();
     }
 }

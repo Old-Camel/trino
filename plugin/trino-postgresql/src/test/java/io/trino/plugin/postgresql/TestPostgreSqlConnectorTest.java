@@ -13,13 +13,20 @@
  */
 package io.trino.plugin.postgresql;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTest;
+import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.RemoteDatabaseEvent;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.JoinCondition;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.sql.planner.assertions.PlanMatchPattern;
+import io.trino.sql.planner.plan.ExchangeNode;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.TableScanNode;
@@ -30,7 +37,6 @@ import io.trino.testing.sql.JdbcSqlExecutor;
 import io.trino.testing.sql.SqlExecutor;
 import io.trino.testing.sql.TestTable;
 import io.trino.testing.sql.TestView;
-import org.intellij.lang.annotations.Language;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -41,11 +47,21 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Stream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.MoreCollectors.onlyElement;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.postgresql.PostgreSqlQueryRunner.createPostgreSqlQueryRunner;
+import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.exchange;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_AGGREGATION_PUSHDOWN;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_LIMIT_PUSHDOWN;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_TOPN_PUSHDOWN;
 import static io.trino.testing.sql.TestTable.randomTableSuffix;
 import static java.lang.Math.round;
 import static java.lang.String.format;
@@ -107,9 +123,6 @@ public class TestPostgreSqlConnectorTest
                 return new PostgreSqlConfig().getArrayMapping() != PostgreSqlConfig.ArrayMapping.DISABLED;
 
             case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
-                return false;
-
-            case SUPPORTS_RENAME_SCHEMA:
                 return false;
 
             case SUPPORTS_CANCELLATION:
@@ -195,6 +208,41 @@ public class TestPostgreSqlConnectorTest
         // SYSTEM VIEW
         assertThat(computeActual("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'tpch'").getOnlyColumn())
                 .contains("orders");
+    }
+
+    @Test
+    public void testPartitionedTables()
+            throws Exception
+    {
+        try (TestTable testTable = new TestTable(
+                postgreSqlServer::execute,
+                "test_part_tbl",
+                "(id int NOT NULL, payload varchar, logdate date NOT NULL) PARTITION BY RANGE (logdate)")) {
+            String values202111 = "(1, 'A', '2021-11-01'), (2, 'B', '2021-11-25')";
+            String values202112 = "(3, 'C', '2021-12-01')";
+            execute(format("CREATE TABLE %s_2021_11 PARTITION OF %s FOR VALUES FROM ('2021-11-01') TO ('2021-12-01')", testTable.getName(), testTable.getName()));
+            execute(format("CREATE TABLE %s_2021_12 PARTITION OF %s FOR VALUES FROM ('2021-12-01') TO ('2022-01-01')", testTable.getName(), testTable.getName()));
+            execute(format("INSERT INTO %s VALUES %s ,%s", testTable.getName(), values202111, values202112));
+            assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet())
+                    .contains(testTable.getName(), testTable.getName() + "_2021_11", testTable.getName() + "_2021_12");
+            assertQuery(format("SELECT * FROM %s", testTable.getName()), format("VALUES %s, %s", values202111, values202112));
+            assertQuery(format("SELECT * FROM %s_2021_12", testTable.getName()), "VALUES " + values202112);
+        }
+
+        try (TestTable testTable = new TestTable(
+                postgreSqlServer::execute,
+                "test_part_tbl",
+                "(id int NOT NULL, type varchar, logdate varchar) PARTITION BY LIST (type)")) {
+            String valuesA = "(1, 'A', '2021-11-11'), (4, 'A', '2021-12-25')";
+            String valuesB = "(3, 'B', '2021-12-12'), (2, 'B', '2021-12-28')";
+            execute(format("CREATE TABLE %s_a PARTITION OF %s FOR VALUES IN ('A')", testTable.getName(), testTable.getName()));
+            execute(format("CREATE TABLE %s_b PARTITION OF %s FOR VALUES IN ('B')", testTable.getName(), testTable.getName()));
+            assertUpdate(format("INSERT INTO %s VALUES %s ,%s", testTable.getName(), valuesA, valuesB), 4);
+            assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet())
+                    .contains(testTable.getName(), testTable.getName() + "_a", testTable.getName() + "_b");
+            assertQuery(format("SELECT * FROM %s", testTable.getName()), format("VALUES %s, %s", valuesA, valuesB));
+            assertQuery(format("SELECT * FROM %s_a", testTable.getName()), "VALUES " + valuesA);
+        }
     }
 
     @Test
@@ -369,6 +417,215 @@ public class TestPostgreSqlConnectorTest
     }
 
     @Test
+    public void testStringPushdownWithCollate()
+    {
+        Session session = Session.builder(getSession())
+                .setCatalogSessionProperty("postgresql", "enable_string_pushdown_with_collate", "true")
+                .build();
+
+        // varchar range
+        assertThat(query(session, "SELECT regionkey, nationkey, name FROM nation WHERE name BETWEEN 'POLAND' AND 'RPA'"))
+                .matches("VALUES (BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25)))")
+                .isFullyPushedDown();
+
+        // varchar IN with small compaction threshold
+        assertThat(query(
+                Session.builder(session)
+                        .setCatalogSessionProperty("postgresql", "domain_compaction_threshold", "1")
+                        .build(),
+                "SELECT regionkey, nationkey, name FROM nation WHERE name IN ('POLAND', 'ROMANIA', 'VIETNAM')"))
+                .matches("VALUES " +
+                        "(BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25))), " +
+                        "(BIGINT '2', BIGINT '21', CAST('VIETNAM' AS varchar(25)))")
+                // Verify that a FilterNode is retained and only a compacted domain is pushed down to connector as a range predicate
+                .isNotFullyPushedDown(node(FilterNode.class, tableScan(
+                        tableHandle -> {
+                            TupleDomain<ColumnHandle> constraint = ((JdbcTableHandle) tableHandle).getConstraint();
+                            ColumnHandle nameColumn = constraint.getDomains().orElseThrow()
+                                    .keySet().stream()
+                                    .map(JdbcColumnHandle.class::cast)
+                                    .filter(column -> column.getColumnName().equals("name"))
+                                    .collect(onlyElement());
+                            return constraint.getDomains().get().get(nameColumn).getValues().getRanges().getOrderedRanges()
+                                    .equals(ImmutableList.of(
+                                            Range.range(
+                                                    createVarcharType(25),
+                                                    utf8Slice("POLAND"), true,
+                                                    utf8Slice("VIETNAM"), true)));
+                        },
+                        TupleDomain.all(),
+                        ImmutableMap.of())));
+
+        // varchar predicate over join
+        Session joinPushdownEnabled = joinPushdownEnabled(session);
+        assertThat(query(joinPushdownEnabled, "SELECT c.name, n.name FROM customer c JOIN nation n ON c.custkey = n.nationkey WHERE address < 'TcGe5gaZNgVePxU5kRrvXBfkasDTea'"))
+                .isFullyPushedDown();
+
+        // join on varchar columns is not pushed down
+        assertThat(query(joinPushdownEnabled, "SELECT c.name, n.name FROM customer c JOIN nation n ON c.address = n.name"))
+                .isNotFullyPushedDown(
+                        node(JoinNode.class,
+                                anyTree(node(TableScanNode.class)),
+                                anyTree(node(TableScanNode.class))));
+    }
+
+    @Test
+    public void testStringJoinPushdownWithCollate()
+    {
+        PlanMatchPattern joinOverTableScans =
+                node(JoinNode.class,
+                        anyTree(node(TableScanNode.class)),
+                        anyTree(node(TableScanNode.class)));
+
+        PlanMatchPattern broadcastJoinOverTableScans =
+                node(JoinNode.class,
+                        node(TableScanNode.class),
+                        exchange(ExchangeNode.Scope.LOCAL,
+                                exchange(ExchangeNode.Scope.REMOTE, ExchangeNode.Type.REPLICATE,
+                                        node(TableScanNode.class))));
+
+        Session sessionWithCollatePushdown = Session.builder(getSession())
+                .setCatalogSessionProperty("postgresql", "enable_string_pushdown_with_collate", "true")
+                .build();
+
+        Session session = joinPushdownEnabled(sessionWithCollatePushdown);
+
+        // Disable DF here for the sake of negative test cases' expected plan. With DF enabled, some operators return in DF's FilterNode and some do not.
+        Session withoutDynamicFiltering = Session.builder(getSession())
+                .setSystemProperty("enable_dynamic_filtering", "false")
+                .setCatalogSessionProperty("postgresql", "enable_string_pushdown_with_collate", "true")
+                .build();
+
+        String notDistinctOperator = "IS NOT DISTINCT FROM";
+        List<String> nonEqualities = Stream.concat(
+                        Stream.of(JoinCondition.Operator.values())
+                                .filter(operator -> operator != JoinCondition.Operator.EQUAL)
+                                .map(JoinCondition.Operator::getValue),
+                        Stream.of(notDistinctOperator))
+                .collect(toImmutableList());
+
+        try (TestTable nationLowercaseTable = new TestTable(
+                // If a connector supports Join pushdown, but does not allow CTAS, we need to make the table creation here overridable.
+                getQueryRunner()::execute,
+                "nation_lowercase",
+                "AS SELECT nationkey, lower(name) name, regionkey FROM nation")) {
+            // basic case
+            assertThat(query(session, "SELECT r.name, n.name FROM nation n JOIN region r ON n.regionkey = r.regionkey")).isFullyPushedDown();
+
+            // join over different columns
+            assertThat(query(session, "SELECT r.name, n.name FROM nation n JOIN region r ON n.nationkey = r.regionkey")).isFullyPushedDown();
+
+            // pushdown when using USING
+            assertThat(query(session, "SELECT r.name, n.name FROM nation n JOIN region r USING(regionkey)")).isFullyPushedDown();
+
+            // varchar equality predicate
+            assertConditionallyPushedDown(
+                    session,
+                    "SELECT n.name, n2.regionkey FROM nation n JOIN nation n2 ON n.name = n2.name",
+                    true,
+                    joinOverTableScans);
+            assertConditionallyPushedDown(
+                    session,
+                    format("SELECT n.name, nl.regionkey FROM nation n JOIN %s nl ON n.name = nl.name", nationLowercaseTable.getName()),
+                    true,
+                    joinOverTableScans);
+
+            // multiple bigint predicates
+            assertThat(query(session, "SELECT n.name, c.name FROM nation n JOIN customer c ON n.nationkey = c.nationkey and n.regionkey = c.custkey"))
+                    .isFullyPushedDown();
+
+            // inequality
+            for (String operator : nonEqualities) {
+                // bigint inequality predicate
+                assertThat(query(withoutDynamicFiltering, format("SELECT r.name, n.name FROM nation n JOIN region r ON n.regionkey %s r.regionkey", operator)))
+                        // Currently no pushdown as inequality predicate is removed from Join to maintain Cross Join and Filter as separate nodes
+                        .isNotFullyPushedDown(broadcastJoinOverTableScans);
+
+                // varchar inequality predicate
+                assertThat(query(withoutDynamicFiltering, format("SELECT n.name, nl.name FROM nation n JOIN %s nl ON n.name %s nl.name", nationLowercaseTable.getName(), operator)))
+                        // Currently no pushdown as inequality predicate is removed from Join to maintain Cross Join and Filter as separate nodes
+                        .isNotFullyPushedDown(broadcastJoinOverTableScans);
+            }
+
+            // inequality along with an equality, which constitutes an equi-condition and allows filter to remain as part of the Join
+            for (String operator : nonEqualities) {
+                assertConditionallyPushedDown(
+                        session,
+                        format("SELECT n.name, c.name FROM nation n JOIN customer c ON n.nationkey = c.nationkey AND n.regionkey %s c.custkey", operator),
+                        expectJoinPushdown(operator),
+                        joinOverTableScans);
+            }
+
+            // varchar inequality along with an equality, which constitutes an equi-condition and allows filter to remain as part of the Join
+            for (String operator : nonEqualities) {
+                assertConditionallyPushedDown(
+                        session,
+                        format("SELECT n.name, nl.name FROM nation n JOIN %s nl ON n.regionkey = nl.regionkey AND n.name %s nl.name", nationLowercaseTable.getName(), operator),
+                        expectJoinPushdown(operator),
+                        joinOverTableScans);
+            }
+
+            // LEFT JOIN
+            assertThat(query(session, "SELECT r.name, n.name FROM nation n LEFT JOIN region r ON n.nationkey = r.regionkey")).isFullyPushedDown();
+            assertThat(query(session, "SELECT r.name, n.name FROM region r LEFT JOIN nation n ON n.nationkey = r.regionkey")).isFullyPushedDown();
+
+            // RIGHT JOIN
+            assertThat(query(session, "SELECT r.name, n.name FROM nation n RIGHT JOIN region r ON n.nationkey = r.regionkey")).isFullyPushedDown();
+            assertThat(query(session, "SELECT r.name, n.name FROM region r RIGHT JOIN nation n ON n.nationkey = r.regionkey")).isFullyPushedDown();
+
+            // FULL JOIN
+            assertConditionallyPushedDown(
+                    session,
+                    "SELECT r.name, n.name FROM nation n FULL JOIN region r ON n.nationkey = r.regionkey",
+                    true,
+                    joinOverTableScans);
+
+            // Join over a (double) predicate
+            assertThat(query(session, "" +
+                    "SELECT c.name, n.name " +
+                    "FROM (SELECT * FROM customer WHERE acctbal > 8000) c " +
+                    "JOIN nation n ON c.custkey = n.nationkey"))
+                    .isFullyPushedDown();
+
+            // Join over a varchar equality predicate
+            assertConditionallyPushedDown(
+                    session,
+                    "SELECT c.name, n.name FROM (SELECT * FROM customer WHERE address = 'TcGe5gaZNgVePxU5kRrvXBfkasDTea') c " +
+                            "JOIN nation n ON c.custkey = n.nationkey",
+                    hasBehavior(SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY),
+                    joinOverTableScans);
+
+            // join over aggregation
+            assertConditionallyPushedDown(
+                    session,
+                    "SELECT * FROM (SELECT regionkey rk, count(nationkey) c FROM nation GROUP BY regionkey) n " +
+                            "JOIN region r ON n.rk = r.regionkey",
+                    hasBehavior(SUPPORTS_AGGREGATION_PUSHDOWN),
+                    joinOverTableScans);
+
+            // join over LIMIT
+            assertConditionallyPushedDown(
+                    session,
+                    "SELECT * FROM (SELECT nationkey FROM nation LIMIT 30) n " +
+                            "JOIN region r ON n.nationkey = r.regionkey",
+                    hasBehavior(SUPPORTS_LIMIT_PUSHDOWN),
+                    joinOverTableScans);
+
+            // join over TopN
+            assertConditionallyPushedDown(
+                    session,
+                    "SELECT * FROM (SELECT nationkey FROM nation ORDER BY regionkey LIMIT 5) n " +
+                            "JOIN region r ON n.nationkey = r.regionkey",
+                    hasBehavior(SUPPORTS_TOPN_PUSHDOWN),
+                    joinOverTableScans);
+
+            // join over join
+            assertThat(query(session, "SELECT * FROM nation n, region r, customer c WHERE n.regionkey = r.regionkey AND r.regionkey = c.custkey"))
+                    .isFullyPushedDown();
+        }
+    }
+
+    @Test
     public void testDecimalPredicatePushdown()
             throws Exception
     {
@@ -438,42 +695,10 @@ public class TestPostgreSqlConnectorTest
         assertUpdate("DROP TABLE char_trailing_space");
     }
 
-    @Test
-    public void testInsertIntoNotNullColumn()
+    @Override
+    protected String errorMessageForInsertIntoNotNullColumn(String columnName)
     {
-        @Language("SQL") String createTableSql = format("" +
-                        "CREATE TABLE %s.tpch.test_insert_not_null (\n" +
-                        "   column_a date,\n" +
-                        "   column_b date NOT NULL\n" +
-                        ")",
-                getSession().getCatalog().get());
-        assertUpdate(createTableSql);
-        assertEquals(computeScalar("SHOW CREATE TABLE test_insert_not_null"), createTableSql);
-
-        assertQueryFails("INSERT INTO test_insert_not_null (column_a) VALUES (date '2012-12-31')", "(?s).*null value in column \"column_b\" violates not-null constraint.*");
-        assertQueryFails("INSERT INTO test_insert_not_null (column_a, column_b) VALUES (date '2012-12-31', null)", "NULL value not allowed for NOT NULL column: column_b");
-
-        assertUpdate("ALTER TABLE test_insert_not_null ADD COLUMN column_c BIGINT NOT NULL");
-
-        createTableSql = format("" +
-                        "CREATE TABLE %s.tpch.test_insert_not_null (\n" +
-                        "   column_a date,\n" +
-                        "   column_b date NOT NULL,\n" +
-                        "   column_c bigint NOT NULL\n" +
-                        ")",
-                getSession().getCatalog().get());
-        assertEquals(computeScalar("SHOW CREATE TABLE test_insert_not_null"), createTableSql);
-
-        assertQueryFails("INSERT INTO test_insert_not_null (column_b) VALUES (date '2012-12-31')", "(?s).*null value in column \"column_c\" violates not-null constraint.*");
-        assertQueryFails("INSERT INTO test_insert_not_null (column_b, column_c) VALUES (date '2012-12-31', null)", "NULL value not allowed for NOT NULL column: column_c");
-
-        assertUpdate("INSERT INTO test_insert_not_null (column_b, column_c) VALUES (date '2012-12-31', 1)", 1);
-        assertUpdate("INSERT INTO test_insert_not_null (column_a, column_b, column_c) VALUES (date '2013-01-01', date '2013-01-02', 2)", 1);
-        assertQuery(
-                "SELECT * FROM test_insert_not_null",
-                "VALUES (NULL, CAST('2012-12-31' AS DATE), 1), (CAST('2013-01-01' AS DATE), CAST('2013-01-02' AS DATE), 2)");
-
-        assertUpdate("DROP TABLE test_insert_not_null");
+        return format("(?s).*null value in column \"%s\" violates not-null constraint.*", columnName);
     }
 
     @Test

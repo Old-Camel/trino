@@ -16,8 +16,8 @@ package io.trino.plugin.pinot.query.aggregation;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.plugin.base.expression.AggregateFunctionRule;
-import io.trino.plugin.pinot.PinotColumnHandle;
+import io.trino.plugin.base.aggregation.AggregateFunctionRule;
+import io.trino.plugin.pinot.query.AggregateExpression;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.expression.Variable;
 
@@ -25,19 +25,18 @@ import java.util.Optional;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.matching.Capture.newCapture;
-import static io.trino.plugin.base.expression.AggregateFunctionPatterns.basicAggregation;
-import static io.trino.plugin.base.expression.AggregateFunctionPatterns.functionName;
-import static io.trino.plugin.base.expression.AggregateFunctionPatterns.outputType;
-import static io.trino.plugin.base.expression.AggregateFunctionPatterns.singleInput;
-import static io.trino.plugin.base.expression.AggregateFunctionPatterns.variable;
+import static io.trino.plugin.base.aggregation.AggregateFunctionPatterns.basicAggregation;
+import static io.trino.plugin.base.aggregation.AggregateFunctionPatterns.functionName;
+import static io.trino.plugin.base.aggregation.AggregateFunctionPatterns.outputType;
+import static io.trino.plugin.base.aggregation.AggregateFunctionPatterns.singleArgument;
+import static io.trino.plugin.base.aggregation.AggregateFunctionPatterns.variable;
 import static io.trino.plugin.pinot.PinotSessionProperties.isCountDistinctPushdownEnabled;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static java.lang.String.format;
 
 public class ImplementCountDistinct
-        implements AggregateFunctionRule
+        implements AggregateFunctionRule<AggregateExpression>
 {
-    private static final Capture<Variable> INPUT = newCapture();
+    private static final Capture<Variable> ARGUMENT = newCapture();
 
     @Override
     public Pattern<AggregateFunction> getPattern()
@@ -45,17 +44,17 @@ public class ImplementCountDistinct
         return basicAggregation()
                 .with(functionName().equalTo("count"))
                 .with(outputType().equalTo(BIGINT))
-                .with(singleInput().matching(variable().capturedAs(INPUT)));
+                .with(singleArgument().matching(variable().capturedAs(ARGUMENT)));
     }
 
     @Override
-    public Optional<PinotColumnHandle> rewrite(AggregateFunction aggregateFunction, Captures captures, RewriteContext context)
+    public Optional<AggregateExpression> rewrite(AggregateFunction aggregateFunction, Captures captures, RewriteContext context)
     {
         if (!isCountDistinctPushdownEnabled(context.getSession())) {
             return Optional.empty();
         }
-        Variable input = captures.get(INPUT);
+        Variable argument = captures.get(ARGUMENT);
         verify(aggregateFunction.getOutputType() == BIGINT);
-        return Optional.of(new PinotColumnHandle(format("distinctcount(%s)", context.getIdentifierQuote().apply(input.getName())), aggregateFunction.getOutputType(), false));
+        return Optional.of(new AggregateExpression("distinctcount", context.getIdentifierQuote().apply(argument.getName()), false));
     }
 }

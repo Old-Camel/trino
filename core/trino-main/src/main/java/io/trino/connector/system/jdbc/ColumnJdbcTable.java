@@ -154,7 +154,7 @@ public class ColumnJdbcTable
             return tupleDomain;
         }
         Predicate<Map<ColumnHandle, NullableValue>> predicate = constraint.predicate().get();
-        Set<ColumnHandle> predicateColumns = constraint.getColumns().orElseThrow(() -> new VerifyException("columns not present for a predicate"));
+        Set<ColumnHandle> predicateColumns = constraint.getPredicateColumns().orElseThrow(() -> new VerifyException("columns not present for a predicate"));
 
         boolean hasSchemaPredicate = predicateColumns.contains(TABLE_SCHEMA_COLUMN);
         boolean hasTablePredicate = predicateColumns.contains(TABLE_NAME_COLUMN);
@@ -197,7 +197,7 @@ public class ColumnJdbcTable
                             .map(CatalogSchemaName::getSchemaName)
                             .collect(toVarcharDomain())
                             .simplify(MAX_DOMAIN_SIZE))
-                    .build());
+                    .buildOrThrow());
         }
 
         List<CatalogSchemaTableName> tables = schemas.stream()
@@ -227,7 +227,7 @@ public class ColumnJdbcTable
                         .map(catalogSchemaTableName -> catalogSchemaTableName.getSchemaTableName().getTableName())
                         .collect(toVarcharDomain())
                         .simplify(MAX_DOMAIN_SIZE))
-                .build());
+                .buildOrThrow());
     }
 
     @Override

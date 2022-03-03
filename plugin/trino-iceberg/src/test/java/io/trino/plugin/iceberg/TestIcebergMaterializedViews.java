@@ -15,8 +15,8 @@ package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
+import io.trino.metadata.MaterializedViewDefinition;
 import io.trino.metadata.QualifiedObjectName;
-import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.sql.tree.ExplainType;
 import io.trino.testing.AbstractTestQueryFramework;
@@ -137,7 +137,21 @@ public class TestIcebergMaterializedViews
         assertThatThrownBy(() -> computeActual("CREATE MATERIALIZED VIEW materialized_view_with_property " +
                 "WITH (invalid_property = ARRAY['_date']) AS " +
                 "SELECT _bigint, _date FROM base_table1"))
-                .hasMessage("Catalog 'iceberg' does not support materialized view property 'invalid_property'");
+                .hasMessage("Catalog 'iceberg' materialized view property 'invalid_property' does not exist");
+    }
+
+    @Test
+    public void testCreateWithDuplicateSourceTableSucceeds()
+    {
+        assertUpdate("" +
+                "CREATE MATERIALIZED VIEW materialized_view_with_duplicate_source AS " +
+                "SELECT _bigint, _date FROM base_table1 " +
+                "UNION ALL " +
+                "SELECT _bigint, _date FROM base_table1 ");
+
+        assertUpdate("REFRESH MATERIALIZED VIEW materialized_view_with_duplicate_source", 12);
+
+        assertQuery("SELECT count(*) FROM materialized_view_with_duplicate_source", "VALUES 12");
     }
 
     @Test
@@ -513,7 +527,7 @@ public class TestIcebergMaterializedViews
         TransactionManager transactionManager = getQueryRunner().getTransactionManager();
         TransactionId transactionId = transactionManager.beginTransaction(false);
         Session session = getSession().beginTransactionId(transactionId, transactionManager, getQueryRunner().getAccessControl());
-        Optional<ConnectorMaterializedViewDefinition> materializedView = getQueryRunner().getMetadata()
+        Optional<MaterializedViewDefinition> materializedView = getQueryRunner().getMetadata()
                 .getMaterializedView(session, new QualifiedObjectName(catalogName, schemaName, objectName));
         assertThat(materializedView).isPresent();
         return materializedView.get().getStorageTable().get().getSchemaTableName();

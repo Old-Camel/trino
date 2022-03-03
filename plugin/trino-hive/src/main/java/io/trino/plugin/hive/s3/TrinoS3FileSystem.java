@@ -195,6 +195,7 @@ public class TrinoS3FileSystem
     public static final String S3_STREAMING_UPLOAD_ENABLED = "trino.s3.streaming.enabled";
     public static final String S3_STREAMING_UPLOAD_PART_SIZE = "trino.s3.streaming.part-size";
     public static final String S3_STORAGE_CLASS = "trino.s3.storage-class";
+    public static final String S3_ROLE_SESSION_NAME = "trino.s3.role-session-name";
 
     private static final Logger log = Logger.get(TrinoS3FileSystem.class);
     private static final TrinoS3FileSystemStats STATS = new TrinoS3FileSystemStats();
@@ -208,6 +209,7 @@ public class TrinoS3FileSystem
     private static final String S3_CUSTOM_SIGNER = "TrinoS3CustomSigner";
     private static final Set<String> GLACIER_STORAGE_CLASSES = ImmutableSet.of(Glacier.toString(), DeepArchive.toString());
     private static final MediaType DIRECTORY_MEDIA_TYPE = MediaType.create("application", "x-directory");
+    private static final String S3_DEFAULT_ROLE_SESSION_NAME = "trino-session";
 
     private URI uri;
     private Path workingDirectory;
@@ -232,6 +234,7 @@ public class TrinoS3FileSystem
     private boolean streamingUploadEnabled;
     private int streamingUploadPartSize;
     private TrinoS3StorageClass s3StorageClass;
+    private String s3RoleSessionName;
 
     private final ExecutorService uploadExecutor = newCachedThreadPool(threadsNamed("s3-upload-%s"));
 
@@ -280,6 +283,7 @@ public class TrinoS3FileSystem
         this.streamingUploadEnabled = conf.getBoolean(S3_STREAMING_UPLOAD_ENABLED, defaults.isS3StreamingUploadEnabled());
         this.streamingUploadPartSize = toIntExact(conf.getLong(S3_STREAMING_UPLOAD_PART_SIZE, defaults.getS3StreamingPartSize().toBytes()));
         this.s3StorageClass = conf.getEnum(S3_STORAGE_CLASS, defaults.getS3StorageClass());
+        this.s3RoleSessionName = conf.get(S3_ROLE_SESSION_NAME, S3_DEFAULT_ROLE_SESSION_NAME);
 
         ClientConfiguration configuration = new ClientConfiguration()
                 .withMaxErrorRetry(maxErrorRetries)
@@ -465,7 +469,7 @@ public class TrinoS3FileSystem
     public FSDataOutputStream create(Path path, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress)
             throws IOException
     {
-        // Ignore the overwrite flag, since Trino always writes to unique file names.
+        // Ignore the overwrite flag, since Trino Hive connector *usually* writes to unique file names.
         // Checking for file existence is thus an unnecessary, expensive operation.
         return new FSDataOutputStream(createOutputStream(path), statistics);
     }
@@ -720,8 +724,7 @@ public class TrinoS3FileSystem
      * This exception is for stopping retries for S3 calls that shouldn't be retried.
      * For example, "Caused by: com.amazonaws.services.s3.model.AmazonS3Exception: Forbidden (Service: Amazon S3; Status Code: 403 ..."
      */
-    @VisibleForTesting
-    static class UnrecoverableS3OperationException
+    public static class UnrecoverableS3OperationException
             extends IOException
     {
         public UnrecoverableS3OperationException(Path path, Throwable cause)
@@ -938,7 +941,7 @@ public class TrinoS3FileSystem
                 .orElseGet(DefaultAWSCredentialsProviderChain::getInstance);
 
         if (iamRole != null) {
-            provider = new STSAssumeRoleSessionCredentialsProvider.Builder(iamRole, "trino-session")
+            provider = new STSAssumeRoleSessionCredentialsProvider.Builder(iamRole, s3RoleSessionName)
                     .withExternalId(externalId)
                     .withLongLivedCredentialsProvider(provider)
                     .build();
@@ -1478,7 +1481,12 @@ public class TrinoS3FileSystem
         private byte[] buffer;
         private int bufferSize;
 
+        private boolean closed;
         private boolean failed;
+        // Mutated and read by main thread; mutated just before scheduling upload to background thread (access does not need to be thread safe)
+        private boolean multipartUploadStarted;
+        // Mutated by background thread which does the multipart upload; read by both main thread and background thread;
+        // Visibility ensured by memory barrier via inProgressUploadFuture
         private Optional<String> uploadId = Optional.empty();
         private Future<UploadPartResult> inProgressUploadFuture;
         private final List<UploadPartResult> parts = new ArrayList<>();
@@ -1541,6 +1549,11 @@ public class TrinoS3FileSystem
         public void close()
                 throws IOException
         {
+            if (closed) {
+                return;
+            }
+            closed = true;
+
             if (failed) {
                 try {
                     abortUpload();
@@ -1572,17 +1585,8 @@ public class TrinoS3FileSystem
         private void flushBuffer(boolean finished)
                 throws IOException
         {
-            try {
-                waitForPreviousUploadFinish();
-            }
-            catch (IOException e) {
-                failed = true;
-                abortUploadSuppressed(e);
-                throw e;
-            }
-
-            // skip multipart upload if there would only be one part
-            if (finished && uploadId.isEmpty()) {
+            // Skip multipart upload if there would only be one part
+            if (finished && !multipartUploadStarted) {
                 InputStream in = new ByteArrayInputStream(buffer, 0, bufferSize);
 
                 ObjectMetadata metadata = new ObjectMetadata();
@@ -1597,6 +1601,7 @@ public class TrinoS3FileSystem
                     return;
                 }
                 catch (AmazonServiceException e) {
+                    failed = true;
                     throw new IOException(e);
                 }
             }
@@ -1605,9 +1610,24 @@ public class TrinoS3FileSystem
             if (bufferSize == buffer.length || (finished && bufferSize > 0)) {
                 byte[] data = buffer;
                 int length = bufferSize;
-                this.buffer = new byte[buffer.length];
-                bufferSize = 0;
 
+                if (finished) {
+                    this.buffer = null;
+                }
+                else {
+                    this.buffer = new byte[buffer.length];
+                    bufferSize = 0;
+                }
+
+                try {
+                    waitForPreviousUploadFinish();
+                }
+                catch (IOException e) {
+                    failed = true;
+                    abortUploadSuppressed(e);
+                    throw e;
+                }
+                multipartUploadStarted = true;
                 inProgressUploadFuture = uploadExecutor.submit(() -> uploadPage(data, length));
             }
         }

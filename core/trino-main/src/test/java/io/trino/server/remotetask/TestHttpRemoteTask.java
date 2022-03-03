@@ -37,18 +37,19 @@ import io.trino.execution.Lifespan;
 import io.trino.execution.NodeTaskMap;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.RemoteTask;
+import io.trino.execution.SplitAssignment;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskInfo;
 import io.trino.execution.TaskManagerConfig;
-import io.trino.execution.TaskSource;
 import io.trino.execution.TaskState;
 import io.trino.execution.TaskStatus;
 import io.trino.execution.TaskTestUtils;
 import io.trino.execution.TestSqlTaskManager;
 import io.trino.execution.buffer.OutputBuffers;
+import io.trino.metadata.BlockEncodingManager;
 import io.trino.metadata.HandleJsonModule;
-import io.trino.metadata.HandleResolver;
+import io.trino.metadata.InternalBlockEncodingSerde;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.Split;
@@ -65,6 +66,7 @@ import io.trino.spi.connector.TestingColumnHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeOperators;
 import io.trino.sql.DynamicFilters;
 import io.trino.sql.planner.Symbol;
@@ -72,12 +74,10 @@ import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.plan.DynamicFilterId;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.tree.SymbolReference;
-import io.trino.testing.TestingHandleResolver;
 import io.trino.testing.TestingSplit;
 import io.trino.type.TypeDeserializer;
 import org.testng.annotations.Test;
 
-import javax.inject.Singleton;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -108,6 +108,7 @@ import java.util.function.BooleanSupplier;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
+import static com.google.inject.Scopes.SINGLETON;
 import static io.airlift.json.JsonBinder.jsonBinder;
 import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
 import static io.airlift.testing.Assertions.assertGreaterThanOrEqual;
@@ -123,6 +124,7 @@ import static io.trino.spi.StandardErrorCode.REMOTE_TASK_MISMATCH;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.testing.assertions.Assert.assertEventually;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -181,14 +183,14 @@ public class TestHttpRemoteTask
 
         Lifespan lifespan = Lifespan.driverGroup(3);
         remoteTask.addSplits(ImmutableMultimap.of(TABLE_SCAN_NODE_ID, new Split(new CatalogName("test"), TestingSplit.createLocalSplit(), lifespan)));
-        poll(() -> testingTaskResource.getTaskSource(TABLE_SCAN_NODE_ID) != null);
-        poll(() -> testingTaskResource.getTaskSource(TABLE_SCAN_NODE_ID).getSplits().size() == 1);
+        poll(() -> testingTaskResource.getTaskSplitAssignment(TABLE_SCAN_NODE_ID) != null);
+        poll(() -> testingTaskResource.getTaskSplitAssignment(TABLE_SCAN_NODE_ID).getSplits().size() == 1);
 
         remoteTask.noMoreSplits(TABLE_SCAN_NODE_ID, lifespan);
-        poll(() -> testingTaskResource.getTaskSource(TABLE_SCAN_NODE_ID).getNoMoreSplitsForLifespan().size() == 1);
+        poll(() -> testingTaskResource.getTaskSplitAssignment(TABLE_SCAN_NODE_ID).getNoMoreSplitsForLifespan().size() == 1);
 
         remoteTask.noMoreSplits(TABLE_SCAN_NODE_ID);
-        poll(() -> testingTaskResource.getTaskSource(TABLE_SCAN_NODE_ID).isNoMoreSplits());
+        poll(() -> testingTaskResource.getTaskSplitAssignment(TABLE_SCAN_NODE_ID).isNoMoreSplits());
 
         remoteTask.cancel();
         poll(() -> remoteTask.getTaskStatus().getState().isDone());
@@ -228,7 +230,7 @@ public class TestHttpRemoteTask
                 ImmutableSet.of(filterId1, filterId2),
                 ImmutableSet.of(filterId1, filterId2),
                 ImmutableSet.of());
-        dynamicFilterService.stageCannotScheduleMoreTasks(new StageId(queryId, 1), 1);
+        dynamicFilterService.stageCannotScheduleMoreTasks(new StageId(queryId, 1), 0, 1);
 
         DynamicFilter dynamicFilter = dynamicFilterService.createDynamicFilter(
                 queryId,
@@ -255,6 +257,8 @@ public class TestHttpRemoteTask
         assertEventually(
                 new Duration(15, SECONDS),
                 () -> assertGreaterThanOrEqual(testingTaskResource.getStatusFetchCounter(), 3L));
+        assertEquals(testingTaskResource.getDynamicFiltersFetchCounter(), 1L, testingTaskResource.getDynamicFiltersFetchRequests().toString());
+
         future = dynamicFilter.isBlocked();
         testingTaskResource.setDynamicFilterDomains(new VersionedDynamicFilterDomains(
                 2L,
@@ -295,7 +299,7 @@ public class TestHttpRemoteTask
                 ImmutableSet.of(filterId1, filterId2),
                 ImmutableSet.of(filterId1, filterId2),
                 ImmutableSet.of());
-        dynamicFilterService.stageCannotScheduleMoreTasks(new StageId(queryId, 1), 1);
+        dynamicFilterService.stageCannotScheduleMoreTasks(new StageId(queryId, 1), 0, 1);
 
         DynamicFilter dynamicFilter = dynamicFilterService.createDynamicFilter(
                 queryId,
@@ -310,7 +314,7 @@ public class TestHttpRemoteTask
         // make sure initial dynamic filter is collected
         CompletableFuture<?> future = dynamicFilter.isBlocked();
         dynamicFilterService.addTaskDynamicFilters(
-                new TaskId(queryId.getId(), 1, 1),
+                new TaskId(new StageId(queryId.getId(), 1), 1, 0),
                 ImmutableMap.of(filterId1, Domain.singleValue(BIGINT, 1L)));
         future.get();
         assertEquals(
@@ -340,7 +344,7 @@ public class TestHttpRemoteTask
 
         future = dynamicFilter.isBlocked();
         dynamicFilterService.addTaskDynamicFilters(
-                new TaskId(queryId.getId(), 1, 1),
+                new TaskId(new StageId(queryId.getId(), 1), 1, 0),
                 ImmutableMap.of(filterId2, Domain.singleValue(BIGINT, 2L)));
         future.get();
         assertEquals(
@@ -402,15 +406,15 @@ public class TestHttpRemoteTask
         Lifespan lifespan = Lifespan.driverGroup(3);
         remoteTask.addSplits(ImmutableMultimap.of(TABLE_SCAN_NODE_ID, new Split(new CatalogName("test"), TestingSplit.createLocalSplit(), lifespan)));
         // wait for splits to be received by remote task
-        poll(() -> testingTaskResource.getTaskSource(TABLE_SCAN_NODE_ID) != null);
-        poll(() -> testingTaskResource.getTaskSource(TABLE_SCAN_NODE_ID).getSplits().size() == expectedSplitsCount);
+        poll(() -> testingTaskResource.getTaskSplitAssignment(TABLE_SCAN_NODE_ID) != null);
+        poll(() -> testingTaskResource.getTaskSplitAssignment(TABLE_SCAN_NODE_ID).getSplits().size() == expectedSplitsCount);
     }
 
     private RemoteTask createRemoteTask(HttpRemoteTaskFactory httpRemoteTaskFactory, Set<DynamicFilterId> outboundDynamicFilterIds)
     {
         return httpRemoteTaskFactory.createRemoteTask(
                 TEST_SESSION,
-                new TaskId("test", 1, 2),
+                new TaskId(new StageId("test", 1), 2, 0),
                 new InternalNode("node-id", URI.create("http://fake.invalid/"), new NodeVersion("version"), false),
                 TaskTestUtils.PLAN_FRAGMENT,
                 ImmutableMultimap.of(),
@@ -435,7 +439,7 @@ public class TestHttpRemoteTask
                     @Override
                     public void configure(Binder binder)
                     {
-                        binder.bind(JsonMapper.class);
+                        binder.bind(JsonMapper.class).in(SINGLETON);
                         binder.bind(Metadata.class).toInstance(createTestMetadataManager());
                         jsonBinder(binder).addDeserializerBinding(Type.class).to(TypeDeserializer.class);
                         jsonCodecBinder(binder).bindJsonCodec(TaskStatus.class);
@@ -444,13 +448,10 @@ public class TestHttpRemoteTask
                         jsonBinder(binder).addDeserializerBinding(Block.class).to(BlockJsonSerde.Deserializer.class);
                         jsonCodecBinder(binder).bindJsonCodec(TaskInfo.class);
                         jsonCodecBinder(binder).bindJsonCodec(TaskUpdateRequest.class);
-                    }
 
-                    @Provides
-                    @Singleton
-                    public BlockEncodingSerde createBlockEncodingSerde(Metadata metadata)
-                    {
-                        return metadata.getBlockEncodingSerde();
+                        binder.bind(TypeManager.class).toInstance(TESTING_TYPE_MANAGER);
+                        binder.bind(BlockEncodingManager.class).in(SINGLETON);
+                        binder.bind(BlockEncodingSerde.class).to(InternalBlockEncodingSerde.class).in(SINGLETON);
                     }
 
                     @Provides
@@ -481,8 +482,6 @@ public class TestHttpRemoteTask
                 .doNotInitializeLogging()
                 .quiet()
                 .initialize();
-        HandleResolver handleResolver = injector.getInstance(HandleResolver.class);
-        handleResolver.addCatalogHandleResolver("test", new TestingHandleResolver());
         return injector.getInstance(HttpRemoteTaskFactory.class);
     }
 
@@ -577,7 +576,7 @@ public class TestHttpRemoteTask
             return buildTaskInfo();
         }
 
-        Map<PlanNodeId, TaskSource> taskSourceMap = new HashMap<>();
+        Map<PlanNodeId, SplitAssignment> taskSplitAssignmentMap = new HashMap<>();
 
         @POST
         @Path("{taskId}")
@@ -588,8 +587,8 @@ public class TestHttpRemoteTask
                 TaskUpdateRequest taskUpdateRequest,
                 @Context UriInfo uriInfo)
         {
-            for (TaskSource source : taskUpdateRequest.getSources()) {
-                taskSourceMap.compute(source.getPlanNodeId(), (planNodeId, taskSource) -> taskSource == null ? source : taskSource.update(source));
+            for (SplitAssignment splitAssignment : taskUpdateRequest.getSplitAssignments()) {
+                taskSplitAssignmentMap.compute(splitAssignment.getPlanNodeId(), (planNodeId, taskSplitAssignment) -> taskSplitAssignment == null ? splitAssignment : taskSplitAssignment.update(splitAssignment));
             }
             if (!taskUpdateRequest.getDynamicFilterDomains().isEmpty()) {
                 dynamicFiltersSentCounter++;
@@ -600,13 +599,13 @@ public class TestHttpRemoteTask
             return buildTaskInfo();
         }
 
-        public synchronized TaskSource getTaskSource(PlanNodeId planNodeId)
+        public synchronized SplitAssignment getTaskSplitAssignment(PlanNodeId planNodeId)
         {
-            TaskSource source = taskSourceMap.get(planNodeId);
-            if (source == null) {
+            SplitAssignment assignment = taskSplitAssignmentMap.get(planNodeId);
+            if (assignment == null) {
                 return null;
             }
-            return new TaskSource(source.getPlanNodeId(), source.getSplits(), source.getNoMoreSplitsForLifespan(), source.isNoMoreSplits());
+            return new SplitAssignment(assignment.getPlanNodeId(), assignment.getSplits(), assignment.getNoMoreSplitsForLifespan(), assignment.isNoMoreSplits());
         }
 
         @GET
@@ -635,7 +634,13 @@ public class TestHttpRemoteTask
         {
             dynamicFiltersFetchCounter++;
             // keep incoming dynamicfilters request log for debugging purposes
-            dynamicFiltersFetchRequests.add(new DynamicFiltersFetchRequest(uriInfo.getRequestUri().toString(), taskId, currentDynamicFiltersVersion));
+            dynamicFiltersFetchRequests.add(new DynamicFiltersFetchRequest(
+                    uriInfo.getRequestUri().toString(),
+                    taskId,
+                    currentDynamicFiltersVersion,
+                    dynamicFilterDomains
+                            .map(VersionedDynamicFilterDomains::getVersion)
+                            .orElse(-1L)));
             return dynamicFilterDomains.orElse(null);
         }
 
@@ -758,7 +763,6 @@ public class TestHttpRemoteTask
                     initialTaskStatus.isOutputBufferOverutilized(),
                     initialTaskStatus.getPhysicalWrittenDataSize(),
                     initialTaskStatus.getMemoryReservation(),
-                    initialTaskStatus.getSystemMemoryReservation(),
                     initialTaskStatus.getRevocableMemoryReservation(),
                     initialTaskStatus.getFullGcCount(),
                     initialTaskStatus.getFullGcTime(),
@@ -772,12 +776,18 @@ public class TestHttpRemoteTask
             private final String uriInfo;
             private final TaskId taskId;
             private final Long currentDynamicFiltersVersion;
+            private final long storedDynamicFiltersVersion;
 
-            private DynamicFiltersFetchRequest(String uriInfo, TaskId taskId, Long currentDynamicFiltersVersion)
+            private DynamicFiltersFetchRequest(
+                    String uriInfo,
+                    TaskId taskId,
+                    Long currentDynamicFiltersVersion,
+                    long storedDynamicFiltersVersion)
             {
                 this.uriInfo = requireNonNull(uriInfo, "uriInfo is null");
                 this.taskId = requireNonNull(taskId, "taskId is null");
                 this.currentDynamicFiltersVersion = requireNonNull(currentDynamicFiltersVersion, "currentDynamicFiltersVersion is null");
+                this.storedDynamicFiltersVersion = storedDynamicFiltersVersion;
             }
 
             @Override
@@ -787,6 +797,7 @@ public class TestHttpRemoteTask
                         .add("uriInfo", uriInfo)
                         .add("taskId", taskId)
                         .add("currentDynamicFiltersVersion", currentDynamicFiltersVersion)
+                        .add("storedDynamicFiltersVersion", storedDynamicFiltersVersion)
                         .toString();
             }
         }

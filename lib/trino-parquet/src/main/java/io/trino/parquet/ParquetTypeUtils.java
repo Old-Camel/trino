@@ -13,7 +13,6 @@
  */
 package io.trino.parquet;
 
-import io.airlift.slice.Slice;
 import io.trino.spi.type.DecimalType;
 import org.apache.parquet.column.Encoding;
 import org.apache.parquet.io.ColumnIO;
@@ -28,7 +27,6 @@ import org.apache.parquet.schema.MessageType;
 
 import javax.annotation.Nullable;
 
-import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -36,7 +34,6 @@ import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimal;
 import static org.apache.parquet.schema.OriginalType.DECIMAL;
 import static org.apache.parquet.schema.Type.Repetition.REPEATED;
 
@@ -245,23 +242,22 @@ public final class ParquetTypeUtils
     // copied from trino-hive DecimalUtils
     public static long getShortDecimalValue(byte[] bytes)
     {
+        return getShortDecimalValue(bytes, 0, bytes.length);
+    }
+
+    public static long getShortDecimalValue(byte[] bytes, int startOffset, int length)
+    {
         long value = 0;
-        if ((bytes[0] & 0x80) != 0) {
-            for (int i = 0; i < 8 - bytes.length; ++i) {
+        if (bytes[startOffset] < 0) {
+            for (int i = 0; i < 8 - length; ++i) {
                 value |= 0xFFL << (8 * (7 - i));
             }
         }
 
-        for (int i = 0; i < bytes.length; i++) {
-            value |= (bytes[bytes.length - i - 1] & 0xFFL) << (8 * i);
+        for (int i = 0; i < length; i++) {
+            value |= (bytes[startOffset + length - i - 1] & 0xFFL) << (8 * i);
         }
 
         return value;
-    }
-
-    public static Slice getLongDecimalValue(byte[] bytes)
-    {
-        BigInteger value = new BigInteger(bytes);
-        return unscaledDecimal(value);
     }
 }

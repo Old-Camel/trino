@@ -25,13 +25,13 @@ import io.trino.metadata.AbstractMockMetadata;
 import io.trino.metadata.BoundSignature;
 import io.trino.metadata.FunctionInvoker;
 import io.trino.metadata.FunctionMetadata;
+import io.trino.metadata.FunctionNullability;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TableProperties;
 import io.trino.metadata.TestingFunctionResolution;
 import io.trino.security.AllowAllAccessControl;
-import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableProperties;
@@ -39,11 +39,10 @@ import io.trino.spi.connector.SortOrder;
 import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeId;
-import io.trino.spi.type.TypeSignature;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.analyzer.TypeSignatureProvider;
-import io.trino.sql.parser.SqlParser;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import io.trino.sql.planner.plan.Assignments;
@@ -98,6 +97,7 @@ import java.util.stream.IntStream;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.metadata.FunctionId.toFunctionId;
+import static io.trino.metadata.FunctionKind.SCALAR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RealType.REAL;
@@ -105,6 +105,8 @@ import static io.trino.sql.ExpressionUtils.and;
 import static io.trino.sql.ExpressionUtils.combineConjuncts;
 import static io.trino.sql.ExpressionUtils.or;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
+import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
+import static io.trino.sql.planner.TypeAnalyzer.createTestingTypeAnalyzer;
 import static io.trino.sql.planner.plan.AggregationNode.globalAggregation;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
 import static io.trino.sql.tree.BooleanLiteral.FALSE_LITERAL;
@@ -124,6 +126,7 @@ public class TestEffectivePredicateExtractor
     private static final Symbol E = new Symbol("e");
     private static final Symbol F = new Symbol("f");
     private static final Symbol G = new Symbol("g");
+    private static final Symbol R = new Symbol("r");
     private static final Expression AE = A.toSymbolReference();
     private static final Expression BE = B.toSymbolReference();
     private static final Expression CE = C.toSymbolReference();
@@ -137,30 +140,6 @@ public class TestEffectivePredicateExtractor
     private final Metadata metadata = new AbstractMockMetadata()
     {
         private final Metadata delegate = functionResolution.getMetadata();
-
-        @Override
-        public BlockEncodingSerde getBlockEncodingSerde()
-        {
-            return delegate.getBlockEncodingSerde();
-        }
-
-        @Override
-        public Type getType(TypeSignature signature)
-        {
-            return delegate.getType(signature);
-        }
-
-        @Override
-        public Type fromSqlType(String sqlType)
-        {
-            return delegate.fromSqlType(sqlType);
-        }
-
-        @Override
-        public Type getType(TypeId id)
-        {
-            return delegate.getType(id);
-        }
 
         @Override
         public ResolvedFunction resolveFunction(Session session, QualifiedName name, List<TypeSignatureProvider> parameterTypes)
@@ -200,10 +179,11 @@ public class TestEffectivePredicateExtractor
                             ImmutableList.of()));
         }
     };
+    private final PlannerContext plannerContext = plannerContextBuilder().withMetadata(metadata).build();
 
-    private final TypeAnalyzer typeAnalyzer = new TypeAnalyzer(new SqlParser(), metadata);
-    private final EffectivePredicateExtractor effectivePredicateExtractor = new EffectivePredicateExtractor(new DomainTranslator(SESSION, metadata), metadata, true);
-    private final EffectivePredicateExtractor effectivePredicateExtractorWithoutTableProperties = new EffectivePredicateExtractor(new DomainTranslator(SESSION, metadata), metadata, false);
+    private final TypeAnalyzer typeAnalyzer = createTestingTypeAnalyzer(plannerContext);
+    private final EffectivePredicateExtractor effectivePredicateExtractor = new EffectivePredicateExtractor(new DomainTranslator(plannerContext), plannerContext, true);
+    private final EffectivePredicateExtractor effectivePredicateExtractorWithoutTableProperties = new EffectivePredicateExtractor(new DomainTranslator(plannerContext), plannerContext, false);
 
     private Map<Symbol, ColumnHandle> scanAssignments;
     private TableScanNode baseTableScan;
@@ -219,7 +199,8 @@ public class TestEffectivePredicateExtractor
                 .put(D, new TestingColumnHandle("d"))
                 .put(E, new TestingColumnHandle("e"))
                 .put(F, new TestingColumnHandle("f"))
-                .build();
+                .put(R, new TestingColumnHandle("r"))
+                .buildOrThrow();
 
         Map<Symbol, ColumnHandle> assignments = Maps.filterKeys(scanAssignments, Predicates.in(ImmutableList.of(A, B, C, D, E, F)));
         baseTableScan = TableScanNode.newInstance(
@@ -596,7 +577,8 @@ public class TestEffectivePredicateExtractor
                 .put(A, BIGINT)
                 .put(B, BIGINT)
                 .put(D, DOUBLE)
-                .build());
+                .put(R, RowType.anonymous(ImmutableList.of(BIGINT, BIGINT)))
+                .buildOrThrow());
 
         // one column
         assertEquals(
@@ -640,6 +622,18 @@ public class TestEffectivePredicateExtractor
                         types,
                         typeAnalyzer),
                 new IsNullPredicate(AE));
+
+        // nested row
+        assertEquals(
+                effectivePredicateExtractor.extract(
+                        SESSION,
+                        new ValuesNode(
+                                newId(),
+                                ImmutableList.of(R),
+                                ImmutableList.of(new Row(ImmutableList.of(new Row(ImmutableList.of(bigintLiteral(1), new NullLiteral())))))),
+                        types,
+                        typeAnalyzer),
+                TRUE_LITERAL);
 
         // many rows
         List<Expression> rows = IntStream.range(0, 500)
@@ -1208,7 +1202,14 @@ public class TestEffectivePredicateExtractor
     private static ResolvedFunction fakeFunction(String name)
     {
         BoundSignature boundSignature = new BoundSignature(name, UNKNOWN, ImmutableList.of());
-        return new ResolvedFunction(boundSignature, toFunctionId(boundSignature.toSignature()), ImmutableMap.of(), ImmutableSet.of());
+        return new ResolvedFunction(
+                boundSignature,
+                toFunctionId(boundSignature.toSignature()),
+                SCALAR,
+                true,
+                new FunctionNullability(false, ImmutableList.of()),
+                ImmutableMap.of(),
+                ImmutableSet.of());
     }
 
     private Set<Expression> normalizeConjuncts(Expression... conjuncts)
@@ -1245,8 +1246,7 @@ public class TestEffectivePredicateExtractor
         return new TableHandle(
                 new CatalogName("test"),
                 new PredicatedTableHandle(predicate),
-                TestingTransactionHandle.create(),
-                Optional.empty());
+                TestingTransactionHandle.create());
     }
 
     /**

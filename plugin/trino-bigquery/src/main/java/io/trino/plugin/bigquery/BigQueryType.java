@@ -28,6 +28,7 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
@@ -88,6 +89,7 @@ public enum BigQueryType
     GEOGRAPHY(VarcharType.VARCHAR, unsupportedToStringConverter()),
     INTEGER(BigintType.BIGINT, BigQueryType::simpleToStringConverter),
     NUMERIC(null, BigQueryType::numericToStringConverter),
+    BIGNUMERIC(null, BigQueryType::numericToStringConverter),
     RECORD(null, unsupportedToStringConverter()),
     STRING(createUnboundedVarcharType(), BigQueryType::stringToStringConverter),
     TIME(TimeType.TIME_MICROS, BigQueryType::timeToStringConverter),
@@ -226,8 +228,7 @@ public enum BigQueryType
 
     static String numericToStringConverter(Object value)
     {
-        Slice slice = (Slice) value;
-        return Decimals.toString(slice, DEFAULT_NUMERIC_TYPE_SCALE);
+        return Decimals.toString((Int128) value, DEFAULT_NUMERIC_TYPE_SCALE);
     }
 
     static String bytesToStringConverter(Object value)
@@ -262,7 +263,7 @@ public enum BigQueryType
 
     private static FieldList toFieldList(RowType rowType)
     {
-        ImmutableList.Builder<Field> fields = new ImmutableList.Builder<>();
+        ImmutableList.Builder<Field> fields = ImmutableList.builder();
         for (RowType.Field field : rowType.getFields()) {
             String fieldName = field.getName()
                     .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "ROW type does not have field names declared: " + rowType));
@@ -323,10 +324,12 @@ public enum BigQueryType
             return Optional.empty();
         }
         if (type instanceof DecimalType) {
+            String bigqueryTypeName = this.toString();
+            verify(bigqueryTypeName.equals("NUMERIC") || bigqueryTypeName.equals("BIGNUMERIC"), "Expected NUMERIC or BIGNUMERIC: %s", bigqueryTypeName);
             if (isShortDecimal(type)) {
-                return Optional.of("NUMERIC " + quote(Decimals.toString((long) value, ((DecimalType) type).getScale())));
+                return Optional.of(format("%s '%s'", bigqueryTypeName, Decimals.toString((long) value, ((DecimalType) type).getScale())));
             }
-            return Optional.of("NUMERIC " + quote(Decimals.toString((Slice) value, ((DecimalType) type).getScale())));
+            return Optional.of(format("%s '%s'", bigqueryTypeName, Decimals.toString((Int128) value, ((DecimalType) type).getScale())));
         }
         return toStringConverter.convertToString(value);
     }
@@ -335,8 +338,10 @@ public enum BigQueryType
     {
         switch (this) {
             case NUMERIC:
+            case BIGNUMERIC:
                 Long precision = typeAdaptor.getPrecision();
                 Long scale = typeAdaptor.getScale();
+                // Unsupported BIGNUMERIC types (precision > 38) are filtered in BigQueryClient.getColumns
                 if (precision != null && scale != null) {
                     return createDecimalType(toIntExact(precision), toIntExact(scale));
                 }

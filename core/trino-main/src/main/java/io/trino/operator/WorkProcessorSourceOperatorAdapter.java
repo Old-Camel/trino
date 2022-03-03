@@ -78,8 +78,7 @@ public class WorkProcessorSourceOperatorAdapter
                         operatorContext.getSession(),
                         new MemoryTrackingContext(
                                 operatorContext.aggregateUserMemoryContext(),
-                                operatorContext.aggregateRevocableMemoryContext(),
-                                operatorContext.aggregateSystemMemoryContext()),
+                                operatorContext.aggregateRevocableMemoryContext()),
                         operatorContext.getDriverContext().getYieldSignal(),
                         WorkProcessor.create(splitBuffer));
         this.pages = sourceOperator.getOutputPages()
@@ -176,9 +175,9 @@ public class WorkProcessorSourceOperatorAdapter
     public void close()
             throws Exception
     {
+        sourceOperator.close();
         operatorContext.setLatestMetrics(sourceOperator.getMetrics());
         operatorContext.setLatestConnectorMetrics(sourceOperator.getConnectorMetrics());
-        sourceOperator.close();
     }
 
     private void updateOperatorStats()

@@ -19,7 +19,10 @@ import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 import org.testng.annotations.Test;
 
+import java.io.File;
+
 import static io.trino.plugin.iceberg.IcebergQueryRunner.createIcebergQueryRunner;
+import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -39,7 +42,6 @@ public class TestIcebergConnectorSmokeTest
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         switch (connectorBehavior) {
-            case SUPPORTS_COMMENT_ON_COLUMN:
             case SUPPORTS_TOPN_PUSHDOWN:
                 return false;
 
@@ -69,6 +71,7 @@ public class TestIcebergConnectorSmokeTest
     @Override
     public void testShowCreateTable()
     {
+        File tempDir = getDistributedQueryRunner().getCoordinator().getBaseDataDir().toFile();
         assertThat((String) computeScalar("SHOW CREATE TABLE region"))
                 .isEqualTo("" +
                         "CREATE TABLE iceberg.tpch.region (\n" +
@@ -77,7 +80,8 @@ public class TestIcebergConnectorSmokeTest
                         "   comment varchar\n" +
                         ")\n" +
                         "WITH (\n" +
-                        "   format = 'ORC'\n" +
+                        "   format = 'ORC',\n" +
+                        format("   location = '%s/iceberg_data/tpch/region'\n", tempDir) +
                         ")");
     }
 }

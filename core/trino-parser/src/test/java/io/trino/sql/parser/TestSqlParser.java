@@ -49,6 +49,7 @@ import io.trino.sql.tree.CurrentTime;
 import io.trino.sql.tree.Deallocate;
 import io.trino.sql.tree.DecimalLiteral;
 import io.trino.sql.tree.Delete;
+import io.trino.sql.tree.Deny;
 import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.DescribeInput;
 import io.trino.sql.tree.DescribeOutput;
@@ -127,6 +128,7 @@ import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.QuantifiedComparisonExpression;
 import io.trino.sql.tree.QuantifiedPattern;
 import io.trino.sql.tree.Query;
+import io.trino.sql.tree.QueryPeriod;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.RangeQuantifier;
 import io.trino.sql.tree.RefreshMaterializedView;
@@ -177,6 +179,7 @@ import io.trino.sql.tree.TableSubquery;
 import io.trino.sql.tree.TimeLiteral;
 import io.trino.sql.tree.TimestampLiteral;
 import io.trino.sql.tree.TransactionAccessMode;
+import io.trino.sql.tree.TruncateTable;
 import io.trino.sql.tree.Union;
 import io.trino.sql.tree.Unnest;
 import io.trino.sql.tree.Update;
@@ -193,7 +196,8 @@ import io.trino.sql.tree.With;
 import io.trino.sql.tree.WithQuery;
 import io.trino.sql.tree.ZeroOrMoreQuantifier;
 import io.trino.sql.tree.ZeroOrOneQuantifier;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -240,6 +244,7 @@ import static io.trino.sql.tree.FrameBound.Type.FOLLOWING;
 import static io.trino.sql.tree.PatternSearchMode.Mode.SEEK;
 import static io.trino.sql.tree.ProcessingMode.Mode.FINAL;
 import static io.trino.sql.tree.ProcessingMode.Mode.RUNNING;
+import static io.trino.sql.tree.SetProperties.Type.MATERIALIZED_VIEW;
 import static io.trino.sql.tree.SkipTo.skipToNextRow;
 import static io.trino.sql.tree.SortItem.NullOrdering.UNDEFINED;
 import static io.trino.sql.tree.SortItem.Ordering.ASCENDING;
@@ -248,12 +253,12 @@ import static io.trino.sql.tree.WindowFrame.Type.ROWS;
 import static java.lang.String.format;
 import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class TestSqlParser
 {
@@ -279,7 +284,8 @@ public class TestSqlParser
         createExpression("(((((((((((((((((((((((((((true)))))))))))))))))))))))))))");
     }
 
-    @Test(timeOut = 2_000)
+    @Test
+    @Timeout(value = 2, unit = SECONDS)
     public void testPotentialUnboundedLookahead()
     {
         createExpression("(\n" +
@@ -301,13 +307,16 @@ public class TestSqlParser
     @Test
     public void testQualifiedName()
     {
-        assertEquals(QualifiedName.of("a", "b", "c", "d").toString(), "a.b.c.d");
-        assertEquals(QualifiedName.of("A", "b", "C", "d").toString(), "a.b.c.d");
+        assertThat(QualifiedName.of("a", "b", "c", "d").toString())
+                .isEqualTo("a.b.c.d");
+        assertThat(QualifiedName.of("A", "b", "C", "d").toString())
+                .isEqualTo("a.b.c.d");
         assertTrue(QualifiedName.of("a", "b", "c", "d").hasSuffix(QualifiedName.of("b", "c", "d")));
         assertTrue(QualifiedName.of("a", "b", "c", "d").hasSuffix(QualifiedName.of("a", "b", "c", "d")));
         assertFalse(QualifiedName.of("a", "b", "c", "d").hasSuffix(QualifiedName.of("a", "c", "d")));
         assertFalse(QualifiedName.of("a", "b", "c", "d").hasSuffix(QualifiedName.of("z", "a", "b", "c", "d")));
-        assertEquals(QualifiedName.of("a", "b", "c", "d"), QualifiedName.of("a", "b", "c", "d"));
+        assertThat(QualifiedName.of("a", "b", "c", "d"))
+                .isEqualTo(QualifiedName.of("a", "b", "c", "d"));
     }
 
     @Test
@@ -355,7 +364,10 @@ public class TestSqlParser
     public void testNumbers()
     {
         assertExpression("9223372036854775807", new LongLiteral("9223372036854775807"));
+        assertInvalidExpression("9223372036854775808", "Invalid numeric literal: 9223372036854775808");
+
         assertExpression("-9223372036854775808", new LongLiteral("-9223372036854775808"));
+        assertInvalidExpression("-9223372036854775809", "Invalid numeric literal: -9223372036854775809");
 
         assertExpression("1E5", new DoubleLiteral("1E5"));
         assertExpression("1E-5", new DoubleLiteral("1E-5"));
@@ -995,6 +1007,20 @@ public class TestSqlParser
     {
         assertStatement("RESET SESSION foo.bar", new ResetSession(QualifiedName.of("foo", "bar")));
         assertStatement("RESET SESSION foo", new ResetSession(QualifiedName.of("foo")));
+    }
+
+    @Test
+    public void testSessionIdentifiers()
+    {
+        assertStatement("SET SESSION \"foo-bar\".baz = 'x'",
+                new SetSession(QualifiedName.of("foo-bar", "baz"), new StringLiteral("x")));
+        assertStatementIsInvalid("SET SESSION foo-bar.name = 'value'")
+                .withMessage("line 1:16: mismatched input '-'. Expecting: '.', '='");
+
+        assertStatement("RESET SESSION \"foo-bar\".baz",
+                new ResetSession(QualifiedName.of("foo-bar", "baz")));
+        assertStatementIsInvalid("RESET SESSION foo-bar.name")
+                .withMessage("line 1:18: mismatched input '-'. Expecting: '.', <EOF>");
     }
 
     @Test
@@ -1719,10 +1745,21 @@ public class TestSqlParser
         assertStatement("DROP TABLE a", new DropTable(QualifiedName.of("a"), false));
         assertStatement("DROP TABLE a.b", new DropTable(QualifiedName.of("a", "b"), false));
         assertStatement("DROP TABLE a.b.c", new DropTable(QualifiedName.of("a", "b", "c"), false));
+        assertStatement("DROP TABLE a.\"b/y\".c", new DropTable(QualifiedName.of("a", "b/y", "c"), false));
 
         assertStatement("DROP TABLE IF EXISTS a", new DropTable(QualifiedName.of("a"), true));
         assertStatement("DROP TABLE IF EXISTS a.b", new DropTable(QualifiedName.of("a", "b"), true));
         assertStatement("DROP TABLE IF EXISTS a.b.c", new DropTable(QualifiedName.of("a", "b", "c"), true));
+        assertStatement("DROP TABLE IF EXISTS a.\"b/y\".c", new DropTable(QualifiedName.of("a", "b/y", "c"), true));
+    }
+
+    @Test
+    public void testTruncateTable()
+            throws Exception
+    {
+        assertStatement("TRUNCATE TABLE a", new TruncateTable(QualifiedName.of("a")));
+        assertStatement("TRUNCATE TABLE a.b", new TruncateTable(QualifiedName.of("a", "b")));
+        assertStatement("TRUNCATE TABLE a.b.c", new TruncateTable(QualifiedName.of("a", "b", "c")));
     }
 
     @Test
@@ -1740,13 +1777,13 @@ public class TestSqlParser
     @Test
     public void testInsertInto()
     {
-        QualifiedName table = QualifiedName.of("a");
+        Table table = new Table(QualifiedName.of("a", "b/c", "d"));
         Query query = simpleQuery(selectList(new AllColumns()), table(QualifiedName.of("t")));
 
-        assertStatement("INSERT INTO a SELECT * FROM t",
+        assertStatement("INSERT INTO a.\"b/c\".d SELECT * FROM t",
                 new Insert(table, Optional.empty(), query));
 
-        assertStatement("INSERT INTO a (c1, c2) SELECT * FROM t",
+        assertStatement("INSERT INTO a.\"b/c\".d (c1, c2) SELECT * FROM t",
                 new Insert(table, Optional.of(ImmutableList.of(identifier("c1"), identifier("c2"))), query));
     }
 
@@ -1814,6 +1851,7 @@ public class TestSqlParser
         assertStatement("ALTER TABLE a SET PROPERTIES foo=123", new SetProperties(SetProperties.Type.TABLE, QualifiedName.of("a"), ImmutableList.of(new Property(new Identifier("foo"), new LongLiteral("123")))));
         assertStatement("ALTER TABLE a SET PROPERTIES foo=123, bar=456", new SetProperties(SetProperties.Type.TABLE, QualifiedName.of("a"), ImmutableList.of(new Property(new Identifier("foo"), new LongLiteral("123")), new Property(new Identifier("bar"), new LongLiteral("456")))));
         assertStatement("ALTER TABLE a SET PROPERTIES \" s p a c e \"='bar'", new SetProperties(SetProperties.Type.TABLE, QualifiedName.of("a"), ImmutableList.of(new Property(new Identifier(" s p a c e "), new StringLiteral("bar")))));
+        assertStatement("ALTER TABLE a SET PROPERTIES foo=123, bar=DEFAULT", new SetProperties(SetProperties.Type.TABLE, QualifiedName.of("a"), ImmutableList.of(new Property(new Identifier("foo"), new LongLiteral("123")), new Property(new Identifier("bar")))));
 
         assertStatementIsInvalid("ALTER TABLE a SET PROPERTIES")
                 .withMessage("line 1:29: mismatched input '<EOF>'. Expecting: <identifier>");
@@ -2050,6 +2088,35 @@ public class TestSqlParser
                         QualifiedName.of("s"),
                         new PrincipalSpecification(PrincipalSpecification.Type.USER, new Identifier("u")),
                         false));
+    }
+
+    @Test
+    public void testDeny()
+    {
+        assertStatement("DENY INSERT, DELETE ON t TO u",
+                new Deny(
+                        Optional.of(ImmutableList.of("INSERT", "DELETE")),
+                        Optional.empty(),
+                        QualifiedName.of("t"),
+                        new PrincipalSpecification(PrincipalSpecification.Type.UNSPECIFIED, new Identifier("u"))));
+        assertStatement("DENY UPDATE ON t TO u",
+                new Deny(
+                        Optional.of(ImmutableList.of("UPDATE")),
+                        Optional.empty(),
+                        QualifiedName.of("t"),
+                        new PrincipalSpecification(PrincipalSpecification.Type.UNSPECIFIED, new Identifier("u"))));
+        assertStatement("DENY ALL PRIVILEGES ON TABLE t TO USER u",
+                new Deny(
+                        Optional.empty(),
+                        Optional.of(GrantOnType.TABLE),
+                        QualifiedName.of("t"),
+                        new PrincipalSpecification(PrincipalSpecification.Type.USER, new Identifier("u"))));
+        assertStatement("DENY SELECT ON SCHEMA s TO USER u",
+                new Deny(
+                        Optional.of(ImmutableList.of("SELECT")),
+                        Optional.of(GrantOnType.SCHEMA),
+                        QualifiedName.of("s"),
+                        new PrincipalSpecification(PrincipalSpecification.Type.USER, new Identifier("u"))));
     }
 
     @Test
@@ -2514,7 +2581,8 @@ public class TestSqlParser
     public void testBinaryLiteralToHex()
     {
         // note that toHexString() always outputs in upper case
-        assertEquals(new BinaryLiteral("ab 01").toHexString(), "AB01");
+        assertThat(new BinaryLiteral("ab 01").toHexString())
+                .isEqualTo("AB01");
     }
 
     @Test
@@ -3217,10 +3285,10 @@ public class TestSqlParser
     public void testRefreshMaterializedView()
     {
         assertStatement("REFRESH MATERIALIZED VIEW test",
-                new RefreshMaterializedView(Optional.empty(), QualifiedName.of("test")));
+                new RefreshMaterializedView(Optional.empty(), new Table(QualifiedName.of("test"))));
 
         assertStatement("REFRESH MATERIALIZED VIEW \"some name that contains space\"",
-                new RefreshMaterializedView(Optional.empty(), QualifiedName.of("some name that contains space")));
+                new RefreshMaterializedView(Optional.empty(), new Table(QualifiedName.of("some name that contains space"))));
     }
 
     @Test
@@ -3240,6 +3308,58 @@ public class TestSqlParser
     {
         assertStatement("ALTER MATERIALIZED VIEW a RENAME TO b", new RenameMaterializedView(QualifiedName.of("a"), QualifiedName.of("b"), false));
         assertStatement("ALTER MATERIALIZED VIEW IF EXISTS a RENAME TO b", new RenameMaterializedView(QualifiedName.of("a"), QualifiedName.of("b"), true));
+    }
+
+    @Test
+    public void testSetMaterializedViewProperties()
+    {
+        assertStatement(
+                "ALTER MATERIALIZED VIEW a SET PROPERTIES foo='bar'",
+                new SetProperties(
+                        MATERIALIZED_VIEW,
+                        QualifiedName.of("a"),
+                        ImmutableList.of(new Property(new Identifier("foo"), new StringLiteral("bar")))));
+        assertStatement(
+                "ALTER MATERIALIZED VIEW a SET PROPERTIES foo=true",
+                new SetProperties(
+                        MATERIALIZED_VIEW,
+                        QualifiedName.of("a"),
+                        ImmutableList.of(new Property(new Identifier("foo"), new BooleanLiteral("true")))));
+        assertStatement(
+                "ALTER MATERIALIZED VIEW a SET PROPERTIES foo=123",
+                new SetProperties(
+                        MATERIALIZED_VIEW,
+                        QualifiedName.of("a"),
+                        ImmutableList.of(new Property(new Identifier("foo"), new LongLiteral("123")))));
+        assertStatement(
+                "ALTER MATERIALIZED VIEW a SET PROPERTIES foo=123, bar=456",
+                new SetProperties(
+                        MATERIALIZED_VIEW,
+                        QualifiedName.of("a"),
+                        ImmutableList.of(
+                                new Property(new Identifier("foo"), new LongLiteral("123")),
+                                new Property(new Identifier("bar"), new LongLiteral("456")))));
+        assertStatement(
+                "ALTER MATERIALIZED VIEW a SET PROPERTIES \" s p a c e \"='bar'",
+                new SetProperties(
+                        MATERIALIZED_VIEW,
+                        QualifiedName.of("a"),
+                        ImmutableList.of(new Property(new Identifier(" s p a c e "), new StringLiteral("bar")))));
+        assertStatement(
+                "ALTER MATERIALIZED VIEW a SET PROPERTIES foo=123, bar=DEFAULT",
+                new SetProperties(
+                        MATERIALIZED_VIEW,
+                        QualifiedName.of("a"),
+                        ImmutableList.of(
+                                new Property(new Identifier("foo"), new LongLiteral("123")),
+                                new Property(new Identifier("bar")))));
+
+        assertStatementIsInvalid("ALTER MATERIALIZED VIEW a SET PROPERTIES")
+                .withMessage("line 1:41: mismatched input '<EOF>'. Expecting: <identifier>");
+        assertStatementIsInvalid("ALTER MATERIALIZED VIEW a SET PROPERTIES ()")
+                .withMessage("line 1:42: mismatched input '('. Expecting: <identifier>");
+        assertStatementIsInvalid("ALTER MATERIALIZED VIEW a SET PROPERTIES (foo='bar')")
+                .withMessage("line 1:42: mismatched input '('. Expecting: <identifier>");
     }
 
     @Test
@@ -3501,6 +3621,18 @@ public class TestSqlParser
     }
 
     @Test
+    public void testAllRowsReference()
+    {
+        assertThatThrownBy(() -> SQL_PARSER.createStatement("SELECT 1 + A.*", new ParsingOptions(REJECT)))
+                .isInstanceOf(ParsingException.class)
+                .hasMessageMatching("line 1:13: mismatched input '.'.*");
+
+        assertThat(statement("SELECT A.*"))
+                .ignoringLocation()
+                .isEqualTo(simpleQuery(new Select(false, ImmutableList.of(new AllColumns(new Identifier("A"), ImmutableList.of())))));
+    }
+
+    @Test
     public void testUpdate()
     {
         assertStatement("" +
@@ -3529,6 +3661,70 @@ public class TestSqlParser
                         ImmutableList.of(
                                 new UpdateAssignment(new Identifier("bar"), new LongLiteral("23"))),
                         Optional.empty()));
+    }
+
+    @Test
+    public void testQueryPeriod()
+    {
+        Expression rangeValue = new TimestampLiteral(location(1, 37), "2021-03-01 00:00:01");
+        QueryPeriod queryPeriod = new QueryPeriod(location(1, 17), QueryPeriod.RangeType.TIMESTAMP, rangeValue);
+        Table table = new Table(location(1, 15), qualifiedName(location(1, 15), "t"), queryPeriod);
+        assertThat(statement("SELECT * FROM t FOR TIMESTAMP AS OF TIMESTAMP '2021-03-01 00:00:01'"))
+                .isEqualTo(
+                        new Query(
+                                location(1, 1),
+                                Optional.empty(),
+                                new QuerySpecification(
+                                        location(1, 1),
+                                        new Select(
+                                                location(1, 1),
+                                                false,
+                                                ImmutableList.of(
+                                                        new AllColumns(
+                                                                location(1, 8),
+                                                                Optional.empty(),
+                                                                ImmutableList.of()))),
+                                        Optional.of(table),
+                                        Optional.empty(),
+                                        Optional.empty(),
+                                        Optional.empty(),
+                                        ImmutableList.of(),
+                                        Optional.empty(),
+                                        Optional.empty(),
+                                        Optional.empty()),
+                                Optional.empty(),
+                                Optional.empty(),
+                                Optional.empty()));
+
+        rangeValue = new StringLiteral(location(1, 35), "version1");
+        queryPeriod = new QueryPeriod(new NodeLocation(1, 17), QueryPeriod.RangeType.VERSION, rangeValue);
+        table = new Table(location(1, 15), qualifiedName(location(1, 15), "t"), queryPeriod);
+        assertThat(statement("SELECT * FROM t FOR VERSION AS OF 'version1'"))
+                .isEqualTo(
+                        new Query(
+                                location(1, 1),
+                                Optional.empty(),
+                                new QuerySpecification(
+                                        location(1, 1),
+                                        new Select(
+                                                location(1, 1),
+                                                false,
+                                                ImmutableList.of(
+                                                        new AllColumns(
+                                                                location(1, 8),
+                                                                Optional.empty(),
+                                                                ImmutableList.of()))),
+                                        Optional.of(table),
+                                        Optional.empty(),
+                                        Optional.empty(),
+                                        Optional.empty(),
+                                        ImmutableList.of(),
+                                        Optional.empty(),
+                                        Optional.empty(),
+                                        Optional.empty()),
+                                Optional.empty(),
+                                Optional.empty(),
+                                Optional.empty()));
     }
 
     @Test

@@ -26,6 +26,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.ObjectMapperProvider;
 import io.airlift.log.Logger;
@@ -128,6 +129,7 @@ public class ElasticsearchClient
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapperProvider().get();
 
     private static final Pattern ADDRESS_PATTERN = Pattern.compile("((?<cname>[^/]+)/)?(?<ip>.+):(?<port>\\d+)");
+    private static final Set<String> NODE_ROLES = ImmutableSet.of("data", "data_content", "data_hot", "data_warm", "data_cold", "data_frozen");
 
     private final BackpressureRestHighLevelClient client;
     private final int scrollSize;
@@ -401,7 +403,7 @@ public class ElasticsearchClient
             String nodeId = entry.getKey();
             NodesResponse.Node node = entry.getValue();
 
-            if (node.getRoles().contains("data")) {
+            if (!Sets.intersection(node.getRoles(), NODE_ROLES).isEmpty()) {
                 Optional<String> address = node.getAddress()
                         .flatMap(ElasticsearchClient::extractAddress);
 
@@ -526,7 +528,7 @@ public class ElasticsearchClient
                         result.put(element.getKey(), ImmutableList.copyOf(aliasNames));
                     }
                 }
-                return result.build();
+                return result.buildOrThrow();
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
@@ -560,7 +562,14 @@ public class ElasticsearchClient
 
                 JsonNode metaNode = nullSafeNode(mappings, "_meta");
 
-                return new IndexMetadata(parseType(mappings.get("properties"), nullSafeNode(metaNode, "presto")));
+                JsonNode metaProperties = nullSafeNode(metaNode, "trino");
+
+                //stay backwards compatible with _meta.presto namespace for meta properties for some releases
+                if (metaProperties.isNull()) {
+                    metaProperties = nullSafeNode(metaNode, "presto");
+                }
+
+                return new IndexMetadata(parseType(mappings.get("properties"), metaProperties));
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);

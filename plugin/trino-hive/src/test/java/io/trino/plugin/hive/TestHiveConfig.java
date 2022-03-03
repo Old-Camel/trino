@@ -36,6 +36,7 @@ public class TestHiveConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(HiveConfig.class)
+                .setSingleStatementWritesOnly(false)
                 .setMaxSplitSize(DataSize.of(64, Unit.MEGABYTE))
                 .setMaxPartitionsPerScan(100_000)
                 .setMaxOutstandingSplits(1_000)
@@ -46,7 +47,7 @@ public class TestHiveConfig
                 .setMaxPartitionBatchSize(100)
                 .setMaxInitialSplits(200)
                 .setMaxInitialSplitSize(DataSize.of(32, Unit.MEGABYTE))
-                .setSplitLoaderConcurrency(4)
+                .setSplitLoaderConcurrency(64)
                 .setMaxSplitsPerSecond(null)
                 .setDomainCompactionThreshold(100)
                 .setTargetMaxFileSize(DataSize.of(1, Unit.GIGABYTE))
@@ -63,6 +64,7 @@ public class TestHiveConfig
                 .setImmutablePartitions(false)
                 .setInsertExistingPartitionsBehavior(APPEND)
                 .setCreateEmptyBucketFiles(false)
+                .setDeleteSchemaLocationsFallback(false)
                 .setSortedWritingEnabled(true)
                 .setPropagateTableScanSortingProperties(false)
                 .setMaxPartitionsPerWriter(100)
@@ -101,10 +103,11 @@ public class TestHiveConfig
                 .setQueryPartitionFilterRequired(false)
                 .setQueryPartitionFilterRequiredSchemas("")
                 .setProjectionPushdownEnabled(true)
-                .setDynamicFilteringProbeBlockingTimeout(new Duration(0, TimeUnit.MINUTES))
+                .setDynamicFilteringWaitTimeout(new Duration(0, TimeUnit.MINUTES))
                 .setTimestampPrecision(HiveTimestampPrecision.DEFAULT_PRECISION)
                 .setOptimizeSymlinkListing(true)
                 .setLegacyHiveViewTranslation(false)
+                .setIcebergCatalogName(null)
                 .setSizeBasedSplitWeightsEnabled(true)
                 .setMinimumAssignedSplitWeight(0.05));
     }
@@ -112,7 +115,8 @@ public class TestHiveConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("hive.single-statement-writes", "true")
                 .put("hive.max-split-size", "256MB")
                 .put("hive.max-partitions-per-scan", "123")
                 .put("hive.max-outstanding-splits", "10")
@@ -136,6 +140,7 @@ public class TestHiveConfig
                 .put("hive.immutable-partitions", "true")
                 .put("hive.insert-existing-partitions-behavior", "OVERWRITE")
                 .put("hive.create-empty-bucket-files", "true")
+                .put("hive.delete-schema-locations-fallback", "true")
                 .put("hive.max-partitions-per-writers", "222")
                 .put("hive.max-open-sort-files", "333")
                 .put("hive.write-validation-threads", "11")
@@ -178,15 +183,17 @@ public class TestHiveConfig
                 .put("hive.query-partition-filter-required", "true")
                 .put("hive.query-partition-filter-required-schemas", "foo, bar")
                 .put("hive.projection-pushdown-enabled", "false")
-                .put("hive.dynamic-filtering-probe-blocking-timeout", "10s")
+                .put("hive.dynamic-filtering.wait-timeout", "10s")
                 .put("hive.timestamp-precision", "NANOSECONDS")
                 .put("hive.optimize-symlink-listing", "false")
                 .put("hive.legacy-hive-view-translation", "true")
+                .put("hive.iceberg-catalog-name", "iceberg")
                 .put("hive.size-based-split-weights-enabled", "false")
                 .put("hive.minimum-assigned-split-weight", "1.0")
-                .build();
+                .buildOrThrow();
 
         HiveConfig expected = new HiveConfig()
+                .setSingleStatementWritesOnly(true)
                 .setMaxSplitSize(DataSize.of(256, Unit.MEGABYTE))
                 .setMaxPartitionsPerScan(123)
                 .setMaxOutstandingSplits(10)
@@ -214,6 +221,7 @@ public class TestHiveConfig
                 .setImmutablePartitions(true)
                 .setInsertExistingPartitionsBehavior(OVERWRITE)
                 .setCreateEmptyBucketFiles(true)
+                .setDeleteSchemaLocationsFallback(true)
                 .setMaxPartitionsPerWriter(222)
                 .setMaxOpenSortFiles(333)
                 .setWriteValidationThreads(11)
@@ -252,10 +260,11 @@ public class TestHiveConfig
                 .setQueryPartitionFilterRequired(true)
                 .setQueryPartitionFilterRequiredSchemas("foo, bar")
                 .setProjectionPushdownEnabled(false)
-                .setDynamicFilteringProbeBlockingTimeout(new Duration(10, TimeUnit.SECONDS))
+                .setDynamicFilteringWaitTimeout(new Duration(10, TimeUnit.SECONDS))
                 .setTimestampPrecision(HiveTimestampPrecision.NANOSECONDS)
                 .setOptimizeSymlinkListing(false)
                 .setLegacyHiveViewTranslation(true)
+                .setIcebergCatalogName("iceberg")
                 .setSizeBasedSplitWeightsEnabled(false)
                 .setMinimumAssignedSplitWeight(1.0);
 

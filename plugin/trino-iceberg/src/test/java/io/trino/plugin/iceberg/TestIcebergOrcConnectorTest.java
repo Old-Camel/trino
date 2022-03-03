@@ -15,7 +15,7 @@ package io.trino.plugin.iceberg;
 
 import io.trino.Session;
 
-import static org.apache.iceberg.FileFormat.ORC;
+import static io.trino.plugin.iceberg.IcebergFileFormat.ORC;
 
 public class TestIcebergOrcConnectorTest
         extends BaseIcebergConnectorTest
@@ -28,9 +28,8 @@ public class TestIcebergOrcConnectorTest
     @Override
     protected boolean supportsIcebergFileStatistics(String typeName)
     {
-        return !(typeName.equalsIgnoreCase("boolean") ||
-                typeName.equalsIgnoreCase("varbinary") ||
-                typeName.contains("timestamp"));
+        return !(typeName.equalsIgnoreCase("varbinary")) &&
+                !(typeName.equalsIgnoreCase("uuid"));
     }
 
     @Override

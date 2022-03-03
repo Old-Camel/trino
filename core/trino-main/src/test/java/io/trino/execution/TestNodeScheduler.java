@@ -47,6 +47,7 @@ import io.trino.spi.connector.ConnectorSplit;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.TestingSession;
 import io.trino.util.FinalizerService;
+import org.openjdk.jol.info.ClassLayout;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
@@ -72,6 +73,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.testing.Assertions.assertLessThanOrEqual;
 import static io.trino.spi.StandardErrorCode.NO_NODES_AVAILABLE;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
@@ -205,7 +207,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         int task = 0;
         for (InternalNode node : assignments.keySet()) {
-            TaskId taskId = new TaskId("test", 1, task);
+            TaskId taskId = new TaskId(new StageId("test", 1), task, 0);
             task++;
             MockRemoteTaskFactory.MockRemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, ImmutableList.copyOf(assignments.get(node)), nodeTaskMap.createPartitionedSplitCountTracker(node, taskId));
             remoteTask.startSplits(25);
@@ -322,11 +324,11 @@ public class TestNodeScheduler
 
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         // Max out number of splits on node
-        TaskId taskId1 = new TaskId("test", 1, 1);
+        TaskId taskId1 = new TaskId(new StageId("test", 1), 1, 0);
         RemoteTask remoteTask1 = remoteTaskFactory.createTableScanTask(taskId1, newNode, initialSplits.build(), nodeTaskMap.createPartitionedSplitCountTracker(newNode, taskId1));
         nodeTaskMap.addTask(newNode, remoteTask1);
 
-        TaskId taskId2 = new TaskId("test", 1, 2);
+        TaskId taskId2 = new TaskId(new StageId("test", 1), 2, 0);
         RemoteTask remoteTask2 = remoteTaskFactory.createTableScanTask(taskId2, newNode, initialSplits.build(), nodeTaskMap.createPartitionedSplitCountTracker(newNode, taskId2));
         nodeTaskMap.addTask(newNode, remoteTask2);
 
@@ -381,13 +383,13 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         for (InternalNode node : nodeManager.getActiveConnectorNodes(CONNECTOR_ID)) {
             // Max out number of splits on node
-            TaskId taskId = new TaskId("test", 1, 1);
+            TaskId taskId = new TaskId(new StageId("test", 1), 1, 0);
             RemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, initialSplits.build(), nodeTaskMap.createPartitionedSplitCountTracker(node, taskId));
             nodeTaskMap.addTask(node, remoteTask);
             tasks.add(remoteTask);
         }
 
-        TaskId taskId = new TaskId("test", 1, 2);
+        TaskId taskId = new TaskId(new StageId("test", 1), 2, 0);
         RemoteTask newRemoteTask = remoteTaskFactory.createTableScanTask(taskId, newNode, initialSplits.build(), nodeTaskMap.createPartitionedSplitCountTracker(newNode, taskId));
         // Max out pending splits on new node
         taskMap.put(newNode, newRemoteTask);
@@ -418,7 +420,7 @@ public class TestNodeScheduler
         setUpNodes();
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         InternalNode chosenNode = Iterables.get(nodeManager.getActiveConnectorNodes(CONNECTOR_ID), 0);
-        TaskId taskId = new TaskId("test", 1, 1);
+        TaskId taskId = new TaskId(new StageId("test", 1), 1, 0);
         RemoteTask remoteTask = remoteTaskFactory.createTableScanTask(
                 taskId,
                 chosenNode,
@@ -441,7 +443,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         InternalNode chosenNode = Iterables.get(nodeManager.getActiveConnectorNodes(CONNECTOR_ID), 0);
 
-        TaskId taskId1 = new TaskId("test", 1, 1);
+        TaskId taskId1 = new TaskId(new StageId("test", 1), 1, 0);
         RemoteTask remoteTask1 = remoteTaskFactory.createTableScanTask(taskId1,
                 chosenNode,
                 ImmutableList.of(
@@ -449,7 +451,7 @@ public class TestNodeScheduler
                         new Split(CONNECTOR_ID, new TestSplitRemote(), Lifespan.taskWide())),
                 nodeTaskMap.createPartitionedSplitCountTracker(chosenNode, taskId1));
 
-        TaskId taskId2 = new TaskId("test", 1, 2);
+        TaskId taskId2 = new TaskId(new StageId("test", 1), 2, 0);
         RemoteTask remoteTask2 = remoteTaskFactory.createTableScanTask(
                 taskId2,
                 chosenNode,
@@ -735,8 +737,8 @@ public class TestNodeScheduler
 
         ImmutableSetMultimap.Builder<InetAddress, InternalNode> nodesByHost = ImmutableSetMultimap.builder();
         try {
-            nodesByHost.put(InetAddress.getByName(node1.getInternalUri().getHost()), node1);
-            nodesByHost.put(InetAddress.getByName(node2.getInternalUri().getHost()), node2);
+            nodesByHost.put(node1.getInternalAddress(), node1);
+            nodesByHost.put(node2.getInternalAddress(), node2);
         }
         catch (UnknownHostException e) {
             System.out.println("Could not convert the address");
@@ -777,7 +779,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         int task = 0;
         for (InternalNode node : assignments1.keySet()) {
-            TaskId taskId = new TaskId("test", 1, task);
+            TaskId taskId = new TaskId(new StageId("test", 1), task, 0);
             task++;
             MockRemoteTaskFactory.MockRemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, ImmutableList.copyOf(assignments1.get(node)), nodeTaskMap.createPartitionedSplitCountTracker(node, taskId));
             remoteTask.startSplits(20);
@@ -818,7 +820,7 @@ public class TestNodeScheduler
         int counter = 1;
         for (InternalNode node : nodeManager.getActiveConnectorNodes(CONNECTOR_ID)) {
             // Max out number of unacknowledged splits on each task
-            TaskId taskId = new TaskId("test", 1, counter);
+            TaskId taskId = new TaskId(new StageId("test", 1), counter, 0);
             counter++;
             MockRemoteTaskFactory.MockRemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, initialSplits.build(), nodeTaskMap.createPartitionedSplitCountTracker(node, taskId));
             nodeTaskMap.addTask(node, remoteTask);
@@ -869,6 +871,8 @@ public class TestNodeScheduler
     private static class TestSplitLocal
             implements ConnectorSplit
     {
+        private static final int INSTANCE_SIZE = ClassLayout.parseClass(TestSplitLocal.class).instanceSize();
+
         private final HostAddress address;
         private final SplitWeight splitWeight;
 
@@ -913,6 +917,14 @@ public class TestNodeScheduler
         }
 
         @Override
+        public long getRetainedSizeInBytes()
+        {
+            return INSTANCE_SIZE
+                    + address.getRetainedSizeInBytes()
+                    + splitWeight.getRetainedSizeInBytes();
+        }
+
+        @Override
         public String toString()
         {
             return toStringHelper(this)
@@ -941,11 +953,19 @@ public class TestNodeScheduler
         {
             return this;
         }
+
+        @Override
+        public long getRetainedSizeInBytes()
+        {
+            return 0;
+        }
     }
 
     private static class TestSplitRemote
             implements ConnectorSplit
     {
+        private static final int INSTANCE_SIZE = ClassLayout.parseClass(TestSplitRemote.class).instanceSize();
+
         private final List<HostAddress> hosts;
         private final SplitWeight splitWeight;
 
@@ -991,6 +1011,14 @@ public class TestNodeScheduler
         public SplitWeight getSplitWeight()
         {
             return splitWeight;
+        }
+
+        @Override
+        public long getRetainedSizeInBytes()
+        {
+            return INSTANCE_SIZE
+                    + estimatedSizeOf(hosts, HostAddress::getRetainedSizeInBytes)
+                    + splitWeight.getRetainedSizeInBytes();
         }
     }
 

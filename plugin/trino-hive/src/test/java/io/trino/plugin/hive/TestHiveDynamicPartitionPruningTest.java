@@ -32,7 +32,7 @@ public class TestHiveDynamicPartitionPruningTest
     {
         return HiveQueryRunner.builder()
                 .setExtraProperties(EXTRA_PROPERTIES)
-                .setHiveProperties(ImmutableMap.of("hive.dynamic-filtering-probe-blocking-timeout", "1h"))
+                .setHiveProperties(ImmutableMap.of("hive.dynamic-filtering.wait-timeout", "1h"))
                 .setInitialTables(REQUIRED_TABLES)
                 .build();
     }
@@ -45,6 +45,29 @@ public class TestHiveDynamicPartitionPruningTest
                 tableName,
                 partitionColumns.stream().map(column -> "'" + column + "'").collect(joining(",")),
                 String.join(",", columns));
+        getQueryRunner().execute(sql);
+    }
+
+    @Override
+    protected void createPartitionedTable(String tableName, List<String> columns, List<String> partitionColumns)
+    {
+        @Language("SQL") String sql = format(
+                "CREATE TABLE %s (%s) WITH (partitioned_by=array[%s])",
+                tableName,
+                String.join(",", columns),
+                partitionColumns.stream().map(column -> "'" + column + "'").collect(joining(",")));
+        getQueryRunner().execute(sql);
+    }
+
+    @Override
+    protected void createPartitionedAndBucketedTable(String tableName, List<String> columns, List<String> partitionColumns, List<String> bucketColumns)
+    {
+        @Language("SQL") String sql = format(
+                "CREATE TABLE %s (%s) WITH (partitioned_by=array[%s], bucketed_by=array[%s], bucket_count=10)",
+                tableName,
+                String.join(",", columns),
+                partitionColumns.stream().map(column -> "'" + column + "'").collect(joining(",")),
+                bucketColumns.stream().map(column -> "'" + column + "'").collect(joining(",")));
         getQueryRunner().execute(sql);
     }
 }

@@ -31,6 +31,7 @@ import io.trino.spi.type.Type;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
@@ -79,7 +80,7 @@ public interface JdbcClient
     Connection getConnection(ConnectorSession session, JdbcSplit split)
             throws SQLException;
 
-    default void abortReadConnection(Connection connection)
+    default void abortReadConnection(Connection connection, ResultSet resultSet)
             throws SQLException
     {
         // most drivers do not need this
@@ -129,7 +130,7 @@ public interface JdbcClient
 
     void renameTable(ConnectorSession session, JdbcTableHandle handle, SchemaTableName newTableName);
 
-    default void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Object> properties)
+    default void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> properties)
     {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting table properties");
     }
@@ -162,6 +163,8 @@ public interface JdbcClient
 
     void dropSchema(ConnectorSession session, String schemaName);
 
+    void renameSchema(ConnectorSession session, String schemaName, String newSchemaName);
+
     default Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName)
     {
         return Optional.empty();
@@ -179,4 +182,6 @@ public interface JdbcClient
     }
 
     OptionalLong delete(ConnectorSession session, JdbcTableHandle handle);
+
+    void truncateTable(ConnectorSession session, JdbcTableHandle handle);
 }

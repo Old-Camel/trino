@@ -19,6 +19,8 @@ import com.google.common.primitives.SignedBytes;
 import io.airlift.slice.Slice;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
@@ -34,9 +36,11 @@ import java.math.RoundingMode;
 import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 
@@ -53,8 +57,6 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.CharType.createCharType;
 import static io.trino.spi.type.DateType.DATE;
-import static io.trino.spi.type.Decimals.decodeUnscaledValue;
-import static io.trino.spi.type.Decimals.encodeScaledValue;
 import static io.trino.spi.type.Decimals.encodeShortScaledValue;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -175,7 +177,7 @@ public final class StandardColumnMappings
                     shortDecimalReadFunction(decimalType),
                     shortDecimalWriteFunction(decimalType));
         }
-        return ColumnMapping.sliceMapping(
+        return ColumnMapping.objectMapping(
                 decimalType,
                 longDecimalReadFunction(decimalType, roundingMode),
                 longDecimalWriteFunction(decimalType));
@@ -205,28 +207,32 @@ public final class StandardColumnMappings
         };
     }
 
-    public static SliceReadFunction longDecimalReadFunction(DecimalType decimalType)
+    public static ObjectReadFunction longDecimalReadFunction(DecimalType decimalType)
     {
         return longDecimalReadFunction(decimalType, UNNECESSARY);
     }
 
-    public static SliceReadFunction longDecimalReadFunction(DecimalType decimalType, RoundingMode roundingMode)
+    public static ObjectReadFunction longDecimalReadFunction(DecimalType decimalType, RoundingMode roundingMode)
     {
         // JDBC driver can return BigDecimal with lower scale than column's scale when there are trailing zeroes
         int scale = requireNonNull(decimalType, "decimalType is null").getScale();
         requireNonNull(roundingMode, "roundingMode is null");
-        return (resultSet, columnIndex) -> encodeScaledValue(resultSet.getBigDecimal(columnIndex).setScale(scale, roundingMode));
+        return ObjectReadFunction.of(
+                Int128.class,
+                (resultSet, columnIndex) -> Decimals.valueOf(resultSet.getBigDecimal(columnIndex).setScale(scale, roundingMode)));
     }
 
-    public static SliceWriteFunction longDecimalWriteFunction(DecimalType decimalType)
+    public static ObjectWriteFunction longDecimalWriteFunction(DecimalType decimalType)
     {
         requireNonNull(decimalType, "decimalType is null");
         checkArgument(!decimalType.isShort());
-        return (statement, index, value) -> {
-            BigInteger unscaledValue = decodeUnscaledValue(value);
-            BigDecimal bigDecimal = new BigDecimal(unscaledValue, decimalType.getScale(), new MathContext(decimalType.getPrecision()));
-            statement.setBigDecimal(index, bigDecimal);
-        };
+        return ObjectWriteFunction.of(
+                Int128.class,
+                (statement, index, value) -> {
+                    BigInteger unscaledValue = value.toBigInteger();
+                    BigDecimal bigDecimal = new BigDecimal(unscaledValue, decimalType.getScale(), new MathContext(decimalType.getPrecision()));
+                    statement.setBigDecimal(index, bigDecimal);
+                });
     }
 
     public static ColumnMapping defaultCharColumnMapping(int columnSize, boolean isRemoteCaseSensitive)
@@ -327,15 +333,24 @@ public final class StandardColumnMappings
         return (statement, index, value) -> statement.setBytes(index, value.getBytes());
     }
 
-    public static ColumnMapping dateColumnMapping()
+    /**
+     * @deprecated This method leads to incorrect result when the date value is before 1582 Oct 14.
+     * If driver supports {@link LocalDate}, use {@link #dateColumnMappingUsingLocalDate} instead.
+     */
+    @Deprecated
+    public static ColumnMapping dateColumnMappingUsingSqlDate()
     {
         return ColumnMapping.longMapping(
                 DATE,
-                dateReadFunction(),
-                dateWriteFunction());
+                dateReadFunctionUsingSqlDate(),
+                dateWriteFunctionUsingSqlDate());
     }
 
-    public static LongReadFunction dateReadFunction()
+    /**
+     * @deprecated If driver supports {@link LocalDate}, use {@link #dateReadFunctionUsingLocalDate} instead.
+     */
+    @Deprecated
+    public static LongReadFunction dateReadFunctionUsingSqlDate()
     {
         return (resultSet, columnIndex) -> {
             /*
@@ -354,13 +369,52 @@ public final class StandardColumnMappings
         };
     }
 
-    public static LongWriteFunction dateWriteFunction()
+    /**
+     * @deprecated If driver supports {@link LocalDate}, use {@link #dateWriteFunctionUsingLocalDate} instead.
+     */
+    @Deprecated
+    public static LongWriteFunction dateWriteFunctionUsingSqlDate()
     {
         return (statement, index, value) -> {
             // convert to midnight in default time zone
             long millis = DAYS.toMillis(value);
             statement.setDate(index, new Date(DateTimeZone.UTC.getMillisKeepLocal(DateTimeZone.getDefault(), millis)));
         };
+    }
+
+    public static ColumnMapping dateColumnMappingUsingLocalDate()
+    {
+        return ColumnMapping.longMapping(
+                DATE,
+                dateReadFunctionUsingLocalDate(),
+                dateWriteFunctionUsingLocalDate());
+    }
+
+    public static LongReadFunction dateReadFunctionUsingLocalDate()
+    {
+        return new LongReadFunction() {
+            @Override
+            public boolean isNull(ResultSet resultSet, int columnIndex)
+                    throws SQLException
+            {
+                // 'ResultSet.getObject' without class name may throw an exception
+                // e.g. in MySQL driver, rs.getObject(int) throws for dates between Oct 5 and 14, 1582
+                resultSet.getObject(columnIndex, LocalDate.class);
+                return resultSet.wasNull();
+            }
+
+            @Override
+            public long readLong(ResultSet resultSet, int columnIndex)
+                    throws SQLException
+            {
+                return resultSet.getObject(columnIndex, LocalDate.class).toEpochDay();
+            }
+        };
+    }
+
+    public static LongWriteFunction dateWriteFunctionUsingLocalDate()
+    {
+        return (statement, index, value) -> statement.setObject(index, LocalDate.ofEpochDay(value));
     }
 
     /**

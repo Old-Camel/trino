@@ -21,12 +21,14 @@ import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
+import io.trino.FeaturesConfig;
 import io.trino.Session;
 import io.trino.connector.CatalogName;
 import io.trino.execution.Lifespan;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.Split;
 import io.trino.metadata.TableHandle;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverContext;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.FilterAndProjectOperator;
@@ -55,12 +57,14 @@ import io.trino.spi.connector.RecordPageSource;
 import io.trino.spi.connector.RecordSet;
 import io.trino.spi.predicate.Utils;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import io.trino.split.PageSourceProvider;
-import io.trino.sql.analyzer.FeaturesConfig;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.planner.ExpressionInterpreter;
 import io.trino.sql.planner.Symbol;
@@ -73,8 +77,8 @@ import io.trino.sql.tree.NodeRef;
 import io.trino.sql.tree.SymbolReference;
 import io.trino.testing.LocalQueryRunner;
 import io.trino.testing.MaterializedResult;
-import io.trino.transaction.TransactionManager;
 import io.trino.type.BlockTypeOperators;
+import org.intellij.lang.annotations.Language;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.openjdk.jol.info.ClassLayout;
@@ -118,7 +122,6 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.DecimalType.createDecimalType;
-import static io.trino.spi.type.Decimals.encodeScaledValue;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
@@ -138,6 +141,7 @@ import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
@@ -188,7 +192,7 @@ public final class FunctionAssertions
             .put(new Symbol("bound_row"), TEST_ROW_TYPE)
             .put(new Symbol("bound_short_decimal"), SHORT_DECIMAL_TYPE)
             .put(new Symbol("bound_long_decimal"), LONG_DECIMAL_TYPE)
-            .build());
+            .buildOrThrow());
 
     private static final Map<Symbol, Integer> INPUT_MAPPING = ImmutableMap.<Symbol, Integer>builder()
             .put(new Symbol("bound_long"), 0)
@@ -204,16 +208,14 @@ public final class FunctionAssertions
             .put(new Symbol("bound_row"), 10)
             .put(new Symbol("bound_short_decimal"), 11)
             .put(new Symbol("bound_long_decimal"), 12)
-            .build();
+            .buildOrThrow();
 
     private static final PageSourceProvider PAGE_SOURCE_PROVIDER = new TestPageSourceProvider();
     private static final PlanNodeId SOURCE_ID = new PlanNodeId("scan");
 
     private final Session session;
     private final LocalQueryRunner runner;
-    private final TransactionManager transactionManager;
-    private final Metadata metadata;
-    private final ExpressionCompiler compiler;
+    private final TestingFunctionResolution testingFunctionResolution;
 
     public FunctionAssertions()
     {
@@ -231,14 +233,22 @@ public final class FunctionAssertions
         runner = LocalQueryRunner.builder(session)
                 .withFeaturesConfig(featuresConfig)
                 .build();
-        transactionManager = runner.getTransactionManager();
-        metadata = runner.getMetadata();
-        compiler = runner.getExpressionCompiler();
+        testingFunctionResolution = new TestingFunctionResolution(runner.getTransactionManager(), runner.getMetadata());
     }
 
     public Metadata getMetadata()
     {
-        return metadata;
+        return runner.getMetadata();
+    }
+
+    public PlannerContext getPlannerContext()
+    {
+        return runner.getPlannerContext();
+    }
+
+    public TestingFunctionResolution getFunctionResolution()
+    {
+        return testingFunctionResolution;
     }
 
     public TypeOperators getTypeOperators()
@@ -262,13 +272,13 @@ public final class FunctionAssertions
             expected = ((Slice) expected).toStringUtf8();
         }
 
-        Object actual = selectSingleValue(projection, expectedType, compiler);
+        Object actual = selectSingleValue(projection, expectedType, runner.getExpressionCompiler());
         assertEquals(actual, expected);
     }
 
     public void assertFunctionString(String projection, Type expectedType, String expected)
     {
-        Object actual = selectSingleValue(projection, expectedType, compiler);
+        Object actual = selectSingleValue(projection, expectedType, runner.getExpressionCompiler());
         assertEquals(actual.toString(), expected);
     }
 
@@ -279,7 +289,7 @@ public final class FunctionAssertions
 
     public void tryEvaluate(String expression, Type expectedType, Session session)
     {
-        selectUniqueValue(expression, expectedType, session, compiler);
+        selectUniqueValue(expression, expectedType, session, runner.getExpressionCompiler());
     }
 
     public void tryEvaluateWithAll(String expression, Type expectedType)
@@ -289,7 +299,7 @@ public final class FunctionAssertions
 
     public void tryEvaluateWithAll(String expression, Type expectedType, Session session)
     {
-        executeProjectionWithAll(expression, expectedType, session, compiler);
+        executeProjectionWithAll(expression, expectedType, session, runner.getExpressionCompiler());
     }
 
     public void executeProjectionWithFullEngine(String projection)
@@ -331,6 +341,13 @@ public final class FunctionAssertions
                 .hasErrorCode(expectedErrorCode);
     }
 
+    public void assertFunctionThrowsIncorrectly(@Language("SQL") String projection, Class<? extends Throwable> throwableClass, @Language("RegExp") String message)
+    {
+        assertThatThrownBy(() -> evaluateInvalid(projection))
+                .isInstanceOf(throwableClass)
+                .hasMessageMatching(message);
+    }
+
     public void assertNumericOverflow(String projection, String message)
     {
         assertTrinoExceptionThrownBy(() -> evaluateInvalid(projection))
@@ -354,16 +371,16 @@ public final class FunctionAssertions
     private void evaluateInvalid(String projection)
     {
         // type isn't necessary as the function is not valid
-        selectSingleValue(projection, UNKNOWN, compiler);
+        selectSingleValue(projection, UNKNOWN, runner.getExpressionCompiler());
     }
 
     public void assertCachedInstanceHasBoundedRetainedSize(String projection)
     {
-        transaction(transactionManager, new AllowAllAccessControl())
+        transaction(runner.getTransactionManager(), new AllowAllAccessControl())
                 .singleStatement()
                 .execute(session, txSession -> {
                     // metadata.getCatalogHandle() registers the catalog for the transaction
-                    txSession.getCatalog().ifPresent(catalog -> metadata.getCatalogHandle(txSession, catalog));
+                    txSession.getCatalog().ifPresent(catalog -> getMetadata().getCatalogHandle(txSession, catalog));
                     assertCachedInstanceHasBoundedRetainedSizeInTx(projection, txSession);
                     return null;
                 });
@@ -373,9 +390,9 @@ public final class FunctionAssertions
     {
         requireNonNull(projection, "projection is null");
 
-        Expression projectionExpression = createExpression(session, projection, metadata, INPUT_TYPES);
+        Expression projectionExpression = createExpression(session, projection, getPlannerContext(), INPUT_TYPES);
         RowExpression projectionRowExpression = toRowExpression(session, projectionExpression);
-        PageProcessor processor = compiler.compilePageProcessor(Optional.empty(), ImmutableList.of(projectionRowExpression)).get();
+        PageProcessor processor = runner.getExpressionCompiler().compilePageProcessor(Optional.empty(), ImmutableList.of(projectionRowExpression)).get();
 
         // This is a heuristic to detect whether the retained size of cachedInstance is bounded.
         // * The test runs at least 1000 iterations.
@@ -485,11 +502,11 @@ public final class FunctionAssertions
 
     private List<Object> executeProjectionWithAll(String projection, Type expectedType, Session session, ExpressionCompiler compiler)
     {
-        return transaction(transactionManager, new AllowAllAccessControl())
+        return transaction(runner.getTransactionManager(), new AllowAllAccessControl())
                 .singleStatement()
                 .execute(session, txSession -> {
                     // metadata.getCatalogHandle() registers the catalog for the transaction
-                    txSession.getCatalog().ifPresent(catalog -> metadata.getCatalogHandle(txSession, catalog));
+                    txSession.getCatalog().ifPresent(catalog -> getMetadata().getCatalogHandle(txSession, catalog));
                     return executeProjectionWithAllInTx(projection, expectedType, txSession, compiler);
                 });
     }
@@ -498,7 +515,7 @@ public final class FunctionAssertions
     {
         requireNonNull(projection, "projection is null");
 
-        Expression projectionExpression = createExpression(session, projection, metadata, INPUT_TYPES);
+        Expression projectionExpression = createExpression(session, projection, getPlannerContext(), INPUT_TYPES);
         RowExpression projectionRowExpression = toRowExpression(session, projectionExpression);
 
         List<Object> results = new ArrayList<>();
@@ -549,7 +566,7 @@ public final class FunctionAssertions
 
     private RowExpression toRowExpression(Session session, Expression projectionExpression)
     {
-        return toRowExpression(session, projectionExpression, getTypes(session, metadata, INPUT_TYPES, projectionExpression), INPUT_MAPPING);
+        return toRowExpression(session, projectionExpression, getTypes(session, getPlannerContext(), INPUT_TYPES, projectionExpression), INPUT_MAPPING);
     }
 
     private Object selectSingleValue(OperatorFactory operatorFactory, Type type, Session session)
@@ -582,7 +599,7 @@ public final class FunctionAssertions
 
     public void assertFilter(String filter, boolean expected, boolean withNoInputColumns)
     {
-        assertFilter(filter, expected, withNoInputColumns, compiler);
+        assertFilter(filter, expected, withNoInputColumns, runner.getExpressionCompiler());
     }
 
     private void assertFilter(String filter, boolean expected, boolean withNoInputColumns, ExpressionCompiler compiler)
@@ -600,7 +617,7 @@ public final class FunctionAssertions
     {
         requireNonNull(filter, "filter is null");
 
-        Expression filterExpression = createExpression(session, filter, metadata, INPUT_TYPES);
+        Expression filterExpression = createExpression(session, filter, getPlannerContext(), INPUT_TYPES);
         RowExpression filterRowExpression = toRowExpression(session, filterExpression);
 
         List<Boolean> results = new ArrayList<>();
@@ -721,8 +738,8 @@ public final class FunctionAssertions
 
     private Object interpret(Expression expression, Type expectedType, Session session)
     {
-        Map<NodeRef<Expression>, Type> expressionTypes = getTypes(session, metadata, INPUT_TYPES, expression);
-        ExpressionInterpreter evaluator = new ExpressionInterpreter(expression, metadata, session, expressionTypes);
+        Map<NodeRef<Expression>, Type> expressionTypes = getTypes(session, getPlannerContext(), INPUT_TYPES, expression);
+        ExpressionInterpreter evaluator = new ExpressionInterpreter(expression, runner.getPlannerContext(), session, expressionTypes);
 
         Object result = evaluator.evaluate(symbol -> {
             int position = 0;
@@ -748,7 +765,7 @@ public final class FunctionAssertions
             else if (javaType == Slice.class) {
                 return type.getSlice(block, position);
             }
-            else if (javaType == Block.class) {
+            else if (javaType == Block.class || javaType == Int128.class) {
                 return type.getObject(block, position);
             }
             else {
@@ -826,7 +843,7 @@ public final class FunctionAssertions
 
     private RowExpression toRowExpression(Session session, Expression projection, Map<NodeRef<Expression>, Type> expressionTypes, Map<Symbol, Integer> layout)
     {
-        return translate(projection, expressionTypes, layout, metadata, session, false);
+        return translate(projection, expressionTypes, layout, getMetadata(), session, false);
     }
 
     private static Page getAtMostOnePage(Operator operator, Page sourcePage)
@@ -905,7 +922,7 @@ public final class FunctionAssertions
                                 1234,
                                 TEST_ROW_DATA.getObject(0, Block.class),
                                 new BigDecimal("1234").unscaledValue().longValue(),
-                                encodeScaledValue(new BigDecimal("1234")))
+                                Decimals.valueOf(new BigDecimal("1234")))
                         .build();
                 return new RecordPageSource(records);
             }
@@ -967,6 +984,8 @@ public final class FunctionAssertions
     private static class TestSplit
             implements ConnectorSplit
     {
+        private static final int INSTANCE_SIZE = ClassLayout.parseClass(TestSplit.class).instanceSize();
+
         private final boolean recordSet;
 
         private TestSplit(boolean recordSet)
@@ -995,6 +1014,12 @@ public final class FunctionAssertions
         public Object getInfo()
         {
             return this;
+        }
+
+        @Override
+        public long getRetainedSizeInBytes()
+        {
+            return INSTANCE_SIZE;
         }
     }
 }

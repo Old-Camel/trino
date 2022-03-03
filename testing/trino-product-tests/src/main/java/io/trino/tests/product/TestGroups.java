@@ -47,6 +47,7 @@ public final class TestGroups
     public static final String HIVE_VIEWS = "hive_views";
     public static final String HIVE_VIEW_COMPATIBILITY = "hive_view_compatibility";
     public static final String HIVE_CACHING = "hive_caching";
+    public static final String HIVE_ICEBERG_REDIRECTIONS = "hive_iceberg_redirections";
     public static final String AUTHORIZATION = "authorization";
     public static final String HIVE_COERCION = "hive_coercion";
     public static final String CASSANDRA = "cassandra";
@@ -56,7 +57,6 @@ public final class TestGroups
     public static final String LDAP_CLI = "ldap_cli";
     public static final String LDAP_AND_FILE_CLI = "ldap_and_file_cli";
     public static final String LDAP_MULTIPLE_BINDS = "ldap_multiple_binds";
-    public static final String SKIP_ON_CDH = "skip_on_cdh";
     public static final String HDP3_ONLY = "hdp3_only";
     public static final String TLS = "tls";
     public static final String ROLES = "roles";
@@ -66,6 +66,9 @@ public final class TestGroups
     public static final String TWO_HIVES = "two_hives";
     public static final String ICEBERG = "iceberg";
     public static final String AVRO = "avro";
+    public static final String PHOENIX = "phoenix";
+    public static final String CLICKHOUSE = "clickhouse";
+    public static final String KUDU = "kudu";
 
     private TestGroups() {}
 }

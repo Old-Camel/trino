@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>364</version>
+        <version>372</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -186,6 +186,11 @@
                 <exclusion>
                     <groupId>junit</groupId>
                     <artifactId>junit</artifactId>
+                </exclusion>
+                <exclusion>
+                    <!-- not needed for pinot, and results with conflict regarding netty -->
+                    <groupId>io.trino</groupId>
+                    <artifactId>trino-exchange</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>

@@ -14,38 +14,26 @@
 package io.trino.testing;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.MoreCollectors;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.airlift.units.Duration;
+import io.trino.FeaturesConfig;
+import io.trino.FeaturesConfig.JoinDistributionType;
 import io.trino.Session;
-import io.trino.cost.CostCalculator;
-import io.trino.cost.CostCalculatorUsingExchanges;
-import io.trino.cost.CostCalculatorWithEstimatedExchanges;
-import io.trino.cost.CostComparator;
-import io.trino.cost.ScalarStatsCalculator;
-import io.trino.cost.TaskCountEstimator;
-import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.QueryStats;
-import io.trino.execution.TaskManagerConfig;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.TableHandle;
+import io.trino.metadata.TableMetadata;
 import io.trino.operator.OperatorStats;
+import io.trino.server.DynamicFilterService.DynamicFiltersStats;
+import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.QueryId;
-import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.analyzer.FeaturesConfig;
-import io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType;
 import io.trino.sql.analyzer.QueryExplainer;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.planner.Plan;
-import io.trino.sql.planner.PlanFragmenter;
-import io.trino.sql.planner.PlanOptimizers;
-import io.trino.sql.planner.RuleStatsRecorder;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.optimizations.PlanNodeSearcher;
-import io.trino.sql.planner.optimizations.PlanOptimizer;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.ProjectNode;
@@ -66,7 +54,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.Consumer;
-import java.util.function.Predicate;
+import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -77,7 +65,9 @@ import static io.trino.sql.ParsingUtil.createParsingOptions;
 import static io.trino.sql.SqlFormatter.formatSql;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.transaction.TransactionBuilder.transaction;
+import static java.lang.String.format;
 import static java.util.Collections.emptyList;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
@@ -107,11 +97,43 @@ public abstract class AbstractTestQueryFramework
     public final void close()
             throws Exception
     {
-        afterClassCloser.close();
-        queryRunner = null;
-        h2QueryRunner = null;
-        sqlParser = null;
-        queryAssertions = null;
+        try (afterClassCloser) {
+            checkQueryMemoryReleased();
+        }
+        finally {
+            queryRunner = null;
+            h2QueryRunner = null;
+            sqlParser = null;
+            queryAssertions = null;
+        }
+    }
+
+    private void checkQueryMemoryReleased()
+    {
+        if (queryRunner == null) {
+            return;
+        }
+        if (!(queryRunner instanceof DistributedQueryRunner)) {
+            return;
+        }
+        DistributedQueryRunner distributedQueryRunner = (DistributedQueryRunner) queryRunner;
+        assertEventually(
+                new Duration(10, SECONDS),
+                new Duration(1, SECONDS),
+                () -> {
+                    List<TestingTrinoServer> servers = distributedQueryRunner.getServers();
+                    for (int serverId = 0; serverId < servers.size(); ++serverId) {
+                        TestingTrinoServer server = servers.get(serverId);
+                        String serverName = format("server_%d(%s)", serverId, server.isCoordinator() ? "coordinator" : "worker");
+                        assertThat(server.getLocalMemoryManager().getMemoryPool().getReservedBytes())
+                                .describedAs("memory reservation on " + serverName)
+                                .isZero();
+                    }
+
+                    assertThat(distributedQueryRunner.getCoordinator().getClusterMemoryManager().getClusterTotalMemoryReservation())
+                            .describedAs("cluster memory reservation")
+                            .isZero();
+                });
     }
 
     @Test
@@ -155,7 +177,12 @@ public abstract class AbstractTestQueryFramework
 
     protected Object computeScalar(@Language("SQL") String sql)
     {
-        return computeActual(sql).getOnlyValue();
+        return computeScalar(getSession(), sql);
+    }
+
+    protected Object computeScalar(Session session, @Language("SQL") String sql)
+    {
+        return computeActual(session, sql).getOnlyValue();
     }
 
     protected AssertProvider<QueryAssert> query(@Language("SQL") String sql)
@@ -393,21 +420,16 @@ public abstract class AbstractTestQueryFramework
             Session session,
             @Language("SQL") String query,
             Consumer<QueryStats> queryStatsAssertion,
-            Consumer<MaterializedResult> resultAssertion,
-            Duration timeout)
+            Consumer<MaterializedResult> resultAssertion)
     {
-        // TODO: replace this with a simple query stats check once we find a way to wait until all pending updates to query stats have been applied
-        // (might be fixed by https://github.com/trinodb/trino/issues/5172)
-        assertEventually(timeout, () -> {
-            DistributedQueryRunner queryRunner = getDistributedQueryRunner();
-            ResultWithQueryId<MaterializedResult> resultWithQueryId = queryRunner.executeWithQueryId(session, query);
-            QueryStats queryStats = queryRunner.getCoordinator()
-                    .getQueryManager()
-                    .getFullQueryInfo(resultWithQueryId.getQueryId())
-                    .getQueryStats();
-            queryStatsAssertion.accept(queryStats);
-            resultAssertion.accept(resultWithQueryId.getResult());
-        });
+        DistributedQueryRunner queryRunner = getDistributedQueryRunner();
+        ResultWithQueryId<MaterializedResult> resultWithQueryId = queryRunner.executeWithQueryId(session, query);
+        QueryStats queryStats = queryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(resultWithQueryId.getQueryId())
+                .getQueryStats();
+        queryStatsAssertion.accept(queryStats);
+        resultAssertion.accept(resultWithQueryId.getResult());
     }
 
     protected MaterializedResult computeExpected(@Language("SQL") String sql, List<? extends Type> resultTypes)
@@ -434,7 +456,7 @@ public abstract class AbstractTestQueryFramework
     //TODO: should WarningCollector be added?
     protected String getExplainPlan(String query, ExplainType.Type planType)
     {
-        QueryExplainer explainer = getQueryExplainer();
+        QueryExplainer explainer = queryRunner.getQueryExplainer();
         return newTransaction()
                 .singleStatement()
                 .execute(getSession(), session -> {
@@ -444,50 +466,12 @@ public abstract class AbstractTestQueryFramework
 
     protected String getGraphvizExplainPlan(String query, ExplainType.Type planType)
     {
-        QueryExplainer explainer = getQueryExplainer();
+        QueryExplainer explainer = queryRunner.getQueryExplainer();
         return newTransaction()
                 .singleStatement()
                 .execute(queryRunner.getDefaultSession(), session -> {
                     return explainer.getGraphvizPlan(session, sqlParser.createStatement(query, createParsingOptions(session)), planType, emptyList(), WarningCollector.NOOP);
                 });
-    }
-
-    private QueryExplainer getQueryExplainer()
-    {
-        Metadata metadata = queryRunner.getMetadata();
-        FeaturesConfig featuresConfig = new FeaturesConfig().setOptimizeHashGeneration(true);
-        boolean forceSingleNode = queryRunner.getNodeCount() == 1;
-        TaskCountEstimator taskCountEstimator = new TaskCountEstimator(queryRunner::getNodeCount);
-        CostCalculator costCalculator = new CostCalculatorUsingExchanges(taskCountEstimator);
-        TypeOperators typeOperators = new TypeOperators();
-        TypeAnalyzer typeAnalyzer = new TypeAnalyzer(sqlParser, metadata);
-        List<PlanOptimizer> optimizers = new PlanOptimizers(
-                metadata,
-                typeOperators,
-                typeAnalyzer,
-                new TaskManagerConfig(),
-                forceSingleNode,
-                queryRunner.getSplitManager(),
-                queryRunner.getPageSourceManager(),
-                queryRunner.getStatsCalculator(),
-                new ScalarStatsCalculator(metadata, typeAnalyzer),
-                costCalculator,
-                new CostCalculatorWithEstimatedExchanges(costCalculator, taskCountEstimator),
-                new CostComparator(featuresConfig),
-                taskCountEstimator,
-                queryRunner.getNodePartitioningManager(),
-                new RuleStatsRecorder()).get();
-        return new QueryExplainer(
-                optimizers,
-                new PlanFragmenter(metadata, queryRunner.getNodePartitioningManager(), new QueryManagerConfig()),
-                metadata,
-                typeOperators,
-                queryRunner.getGroupProvider(),
-                queryRunner.getAccessControl(),
-                sqlParser,
-                queryRunner.getStatsCalculator(),
-                costCalculator,
-                ImmutableMap.of());
     }
 
     protected static void skipTestUnless(boolean requirement)
@@ -523,9 +507,10 @@ public abstract class AbstractTestQueryFramework
                 .build();
     }
 
-    protected OperatorStats searchScanFilterAndProjectOperatorStats(QueryId queryId, Predicate<ConnectorTableHandle> tablePredicate)
+    protected OperatorStats searchScanFilterAndProjectOperatorStats(QueryId queryId, QualifiedObjectName catalogSchemaTableName)
     {
-        Plan plan = getDistributedQueryRunner().getQueryPlan(queryId);
+        DistributedQueryRunner runner = getDistributedQueryRunner();
+        Plan plan = runner.getQueryPlan(queryId);
         PlanNodeId nodeId = PlanNodeSearcher.searchFrom(plan.getRoot())
                 .where(node -> {
                     if (!(node instanceof ProjectNode)) {
@@ -540,7 +525,8 @@ public abstract class AbstractTestQueryFramework
                         return false;
                     }
                     TableScanNode tableScanNode = (TableScanNode) filterNode.getSource();
-                    return tablePredicate.test(tableScanNode.getTable().getConnectorHandle());
+                    TableMetadata tableMetadata = getTableMetadata(tableScanNode.getTable());
+                    return tableMetadata.getQualifiedName().equals(catalogSchemaTableName);
                 })
                 .findOnlyElement()
                 .getId();
@@ -553,6 +539,40 @@ public abstract class AbstractTestQueryFramework
                 .stream()
                 .filter(summary -> nodeId.equals(summary.getPlanNodeId()) && summary.getOperatorType().equals("ScanFilterAndProjectOperator"))
                 .collect(MoreCollectors.onlyElement());
+    }
+
+    protected DynamicFiltersStats getDynamicFilteringStats(QueryId queryId)
+    {
+        return getDistributedQueryRunner().getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(queryId)
+                .getQueryStats()
+                .getDynamicFiltersStats();
+    }
+
+    protected QualifiedObjectName getQualifiedTableName(String tableName)
+    {
+        Session session = getQueryRunner().getDefaultSession();
+        return new QualifiedObjectName(
+                session.getCatalog().orElseThrow(),
+                session.getSchema().orElseThrow(),
+                tableName);
+    }
+
+    private TableMetadata getTableMetadata(TableHandle tableHandle)
+    {
+        return inTransaction(getSession(), transactionSession -> {
+            // metadata.getCatalogHandle() registers the catalog for the transaction
+            getQueryRunner().getMetadata().getCatalogHandle(transactionSession, tableHandle.getCatalogName().getCatalogName());
+            return getQueryRunner().getMetadata().getTableMetadata(transactionSession, tableHandle);
+        });
+    }
+
+    private <T> T inTransaction(Session session, Function<Session, T> transactionSessionConsumer)
+    {
+        return transaction(getQueryRunner().getTransactionManager(), getQueryRunner().getAccessControl())
+                .singleStatement()
+                .execute(session, transactionSessionConsumer);
     }
 
     @CanIgnoreReturnValue

@@ -30,12 +30,16 @@ import org.testng.Assert.ThrowingRunnable;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import java.io.File;
 import java.util.EnumSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.io.Resources.getResource;
+import static io.trino.spi.security.Privilege.UPDATE;
 import static io.trino.spi.testing.InterfaceTestUtils.assertAllMethodsOverridden;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
@@ -65,8 +69,9 @@ public class TestFileBasedAccessControl
         accessControl.checkCanInsertIntoTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
         accessControl.checkCanDeleteFromTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
 
-        accessControl.checkCanCreateTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
+        accessControl.checkCanCreateTable(UNKNOWN, new SchemaTableName("unknown", "unknown"), Map.of());
         accessControl.checkCanDropTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
+        accessControl.checkCanTruncateTable(UNKNOWN, new SchemaTableName("unknown", "unknown"));
         accessControl.checkCanRenameTable(UNKNOWN,
                 new SchemaTableName("unknown", "unknown"),
                 new SchemaTableName("unknown", "new_unknown"));
@@ -82,6 +87,7 @@ public class TestFileBasedAccessControl
         // permissions management APIs are hard coded to deny
         TrinoPrincipal someUser = new TrinoPrincipal(PrincipalType.USER, "some_user");
         assertDenied(() -> accessControl.checkCanGrantTablePrivilege(ADMIN, Privilege.SELECT, new SchemaTableName("any", "any"), someUser, false));
+        assertDenied(() -> accessControl.checkCanDenyTablePrivilege(ADMIN, Privilege.SELECT, new SchemaTableName("any", "any"), someUser));
         assertDenied(() -> accessControl.checkCanRevokeTablePrivilege(ADMIN, Privilege.SELECT, new SchemaTableName("any", "any"), someUser, false));
         assertDenied(() -> accessControl.checkCanCreateRole(ADMIN, "role", Optional.empty()));
         assertDenied(() -> accessControl.checkCanDropRole(ADMIN, "role"));
@@ -202,6 +208,28 @@ public class TestFileBasedAccessControl
         assertDenied(() -> accessControl.checkCanGrantSchemaPrivilege(CHARLIE, privilege, "test", grantee, grantOption));
     }
 
+    @Test
+    public void testDenySchemaPrivilege()
+    {
+        ConnectorAccessControl accessControl = createAccessControl("schema.json");
+        TrinoPrincipal grantee = new TrinoPrincipal(PrincipalType.USER, "alice");
+
+        accessControl.checkCanDenySchemaPrivilege(ADMIN, UPDATE, "bob", grantee);
+        accessControl.checkCanDenySchemaPrivilege(ADMIN, UPDATE, "staff", grantee);
+        accessControl.checkCanDenySchemaPrivilege(ADMIN, UPDATE, "authenticated", grantee);
+        accessControl.checkCanDenySchemaPrivilege(ADMIN, UPDATE, "test", grantee);
+
+        accessControl.checkCanDenySchemaPrivilege(BOB, UPDATE, "bob", grantee);
+        accessControl.checkCanDenySchemaPrivilege(BOB, UPDATE, "staff", grantee);
+        accessControl.checkCanDenySchemaPrivilege(BOB, UPDATE, "authenticated", grantee);
+        assertDenied(() -> accessControl.checkCanDenySchemaPrivilege(BOB, UPDATE, "test", grantee));
+
+        assertDenied(() -> accessControl.checkCanDenySchemaPrivilege(CHARLIE, UPDATE, "bob", grantee));
+        assertDenied(() -> accessControl.checkCanDenySchemaPrivilege(CHARLIE, UPDATE, "staff", grantee));
+        accessControl.checkCanDenySchemaPrivilege(CHARLIE, UPDATE, "authenticated", grantee);
+        assertDenied(() -> accessControl.checkCanDenySchemaPrivilege(CHARLIE, UPDATE, "test", grantee));
+    }
+
     @Test(dataProvider = "privilegeGrantOption")
     public void testRevokeSchemaPrivilege(Privilege privilege, boolean grantOption)
     {
@@ -258,23 +286,25 @@ public class TestFileBasedAccessControl
 
         accessControl.checkCanInsertIntoTable(BOB, bobTable);
         accessControl.checkCanDeleteFromTable(BOB, bobTable);
+        accessControl.checkCanTruncateTable(BOB, bobTable);
         accessControl.checkCanSelectFromColumns(CHARLIE, bobTable, ImmutableSet.of());
         accessControl.checkCanSelectFromColumns(CHARLIE, bobTable, ImmutableSet.of("bobcolumn"));
         accessControl.checkCanInsertIntoTable(CHARLIE, bobTable);
         accessControl.checkCanSelectFromColumns(JOE, bobTable, ImmutableSet.of());
 
-        accessControl.checkCanCreateTable(ADMIN, new SchemaTableName("bob", "test"));
-        accessControl.checkCanCreateTable(ADMIN, testTable);
-        accessControl.checkCanCreateTable(ADMIN, new SchemaTableName("authenticated", "test"));
-        assertDenied(() -> accessControl.checkCanCreateTable(ADMIN, new SchemaTableName("secret", "test")));
+        accessControl.checkCanCreateTable(ADMIN, new SchemaTableName("bob", "test"), Map.of());
+        accessControl.checkCanCreateTable(ADMIN, testTable, Map.of());
+        accessControl.checkCanCreateTable(ADMIN, new SchemaTableName("authenticated", "test"), Map.of());
+        assertDenied(() -> accessControl.checkCanCreateTable(ADMIN, new SchemaTableName("secret", "test"), Map.of()));
 
-        accessControl.checkCanCreateTable(ALICE, new SchemaTableName("aliceschema", "test"));
-        assertDenied(() -> accessControl.checkCanCreateTable(ALICE, testTable));
-        assertDenied(() -> accessControl.checkCanCreateTable(CHARLIE, new SchemaTableName("aliceschema", "test")));
-        assertDenied(() -> accessControl.checkCanCreateTable(CHARLIE, testTable));
+        accessControl.checkCanCreateTable(ALICE, new SchemaTableName("aliceschema", "test"), Map.of());
+        assertDenied(() -> accessControl.checkCanCreateTable(ALICE, testTable, Map.of()));
+        assertDenied(() -> accessControl.checkCanCreateTable(CHARLIE, new SchemaTableName("aliceschema", "test"), Map.of()));
+        assertDenied(() -> accessControl.checkCanCreateTable(CHARLIE, testTable, Map.of()));
 
         accessControl.checkCanCreateViewWithSelectFromColumns(BOB, bobTable, ImmutableSet.of());
         accessControl.checkCanDropTable(ADMIN, bobTable);
+        accessControl.checkCanTruncateTable(ADMIN, bobTable);
 
         accessControl.checkCanRenameTable(ADMIN, bobTable, new SchemaTableName("aliceschema", "newbobtable"));
         accessControl.checkCanRenameTable(ALICE, aliceTable, new SchemaTableName("aliceschema", "newalicetable"));
@@ -282,6 +312,8 @@ public class TestFileBasedAccessControl
         accessControl.checkCanRenameView(ALICE, new SchemaTableName("aliceschema", "aliceview"), new SchemaTableName("aliceschema", "newaliceview"));
         accessControl.checkCanRenameMaterializedView(ADMIN, new SchemaTableName("bobschema", "bobmaterializedview"), new SchemaTableName("aliceschema", "newbobaterializedview"));
         accessControl.checkCanRenameMaterializedView(ALICE, new SchemaTableName("aliceschema", "alicevaterializediew"), new SchemaTableName("aliceschema", "newaliceaterializedview"));
+        accessControl.checkCanSetMaterializedViewProperties(ADMIN, new SchemaTableName("bobschema", "bobmaterializedview"), ImmutableMap.of());
+        accessControl.checkCanSetMaterializedViewProperties(ALICE, new SchemaTableName("aliceschema", "alicevaterializediew"), ImmutableMap.of());
 
         accessControl.checkCanSetTableProperties(ADMIN, bobTable, ImmutableMap.of());
         accessControl.checkCanSetTableProperties(ALICE, aliceTable, ImmutableMap.of());
@@ -299,6 +331,8 @@ public class TestFileBasedAccessControl
         assertDenied(() -> accessControl.checkCanRenameView(ALICE, aliceTable, new SchemaTableName("bobschema", "newalicetable")));
         assertDenied(() -> accessControl.checkCanRenameMaterializedView(BOB, new SchemaTableName("bobschema", "bobmaterializedview"), new SchemaTableName("bobschema", "newbobaterializedview")));
         assertDenied(() -> accessControl.checkCanRenameMaterializedView(ALICE, aliceTable, new SchemaTableName("bobschema", "newaliceaterializedview")));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewProperties(ALICE, new SchemaTableName("bobschema", "bobmaterializedview"), ImmutableMap.of()));
+        assertDenied(() -> accessControl.checkCanSetMaterializedViewProperties(BOB, new SchemaTableName("bobschema", "bobmaterializedview"), ImmutableMap.of()));
 
         accessControl.checkCanSetTableAuthorization(ADMIN, testTable, new TrinoPrincipal(PrincipalType.ROLE, "some_role"));
         accessControl.checkCanSetTableAuthorization(ADMIN, testTable, new TrinoPrincipal(PrincipalType.USER, "some_user"));
@@ -441,12 +475,10 @@ public class TestFileBasedAccessControl
                 new QueryId("query_id"));
     }
 
-    private ConnectorAccessControl createAccessControl(String fileName)
+    private static ConnectorAccessControl createAccessControl(String fileName)
     {
-        String path = this.getClass().getClassLoader().getResource(fileName).getPath();
-        FileBasedAccessControlConfig config = new FileBasedAccessControlConfig();
-        config.setConfigFile(path);
-        return new FileBasedAccessControl(new CatalogName("test_catalog"), config);
+        File configFile = new File(getResource(fileName).getPath());
+        return new FileBasedAccessControl(new CatalogName("test_catalog"), configFile);
     }
 
     private static void assertDenied(ThrowingRunnable runnable)

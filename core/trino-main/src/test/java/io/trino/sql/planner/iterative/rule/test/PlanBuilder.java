@@ -25,6 +25,7 @@ import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.metadata.IndexHandle;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TableExecuteHandle;
 import io.trino.metadata.TableHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
@@ -79,6 +80,7 @@ import io.trino.sql.planner.plan.SortNode;
 import io.trino.sql.planner.plan.SpatialJoinNode;
 import io.trino.sql.planner.plan.StatisticAggregations;
 import io.trino.sql.planner.plan.StatisticAggregationsDescriptor;
+import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
 import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TableWriterNode;
@@ -97,9 +99,9 @@ import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.FunctionCall;
 import io.trino.sql.tree.NullLiteral;
 import io.trino.sql.tree.Row;
-import io.trino.testing.TestingHandle;
 import io.trino.testing.TestingMetadata.TestingColumnHandle;
 import io.trino.testing.TestingMetadata.TestingTableHandle;
+import io.trino.testing.TestingTableExecuteHandle;
 import io.trino.testing.TestingTransactionHandle;
 
 import java.util.ArrayList;
@@ -584,7 +586,7 @@ public class PlanBuilder
     public static class TableScanBuilder
     {
         private final PlanNodeIdAllocator idAllocator;
-        private TableHandle tableHandle = new TableHandle(new CatalogName("testConnector"), new TestingTableHandle(), TestingTransactionHandle.create(), Optional.of(TestingHandle.INSTANCE));
+        private TableHandle tableHandle = new TableHandle(new CatalogName("testConnector"), new TestingTableHandle(), TestingTransactionHandle.create());
         private List<Symbol> symbols;
         private Map<Symbol, ColumnHandle> assignments;
         private TupleDomain<ColumnHandle> enforcedConstraint = TupleDomain.all();
@@ -658,7 +660,7 @@ public class PlanBuilder
         }
     }
 
-    public TableFinishNode tableDelete(SchemaTableName schemaTableName, PlanNode deleteSource, Symbol deleteRowId)
+    public TableFinishNode tableWithExchangeDelete(SchemaTableName schemaTableName, PlanNode deleteSource, Symbol deleteRowId)
     {
         DeleteTarget deleteTarget = deleteTarget(schemaTableName);
         return new TableFinishNode(
@@ -672,6 +674,23 @@ public class PlanBuilder
                                 ImmutableList.of(deleteRowId)))
                         .addInputsSet(deleteRowId)
                         .singleDistributionPartitioningScheme(deleteRowId)),
+                deleteTarget,
+                deleteRowId,
+                Optional.empty(),
+                Optional.empty());
+    }
+
+    public TableFinishNode tableDelete(SchemaTableName schemaTableName, PlanNode deleteSource, Symbol deleteRowId)
+    {
+        DeleteTarget deleteTarget = deleteTarget(schemaTableName);
+        return new TableFinishNode(
+                idAllocator.getNextId(),
+                new DeleteNode(
+                        idAllocator.getNextId(),
+                        deleteSource,
+                        deleteTarget,
+                        deleteRowId,
+                        ImmutableList.of(deleteRowId)),
                 deleteTarget,
                 deleteRowId,
                 Optional.empty(),
@@ -694,8 +713,7 @@ public class PlanBuilder
                 Optional.of(new TableHandle(
                         new CatalogName("testConnector"),
                         new TestingTableHandle(),
-                        TestingTransactionHandle.create(),
-                        Optional.of(TestingHandle.INSTANCE))),
+                        TestingTransactionHandle.create())),
                 schemaTableName);
     }
 
@@ -733,8 +751,7 @@ public class PlanBuilder
                 Optional.of(new TableHandle(
                         new CatalogName("testConnector"),
                         new TestingTableHandle(),
-                        TestingTransactionHandle.create(),
-                        Optional.of(TestingHandle.INSTANCE))),
+                        TestingTransactionHandle.create())),
                 schemaTableName,
                 columnsToBeUpdated,
                 columnsToBeUpdated.stream()
@@ -1126,6 +1143,36 @@ public class PlanBuilder
                 preferredPartitioningScheme,
                 statisticAggregations,
                 statisticAggregationsDescriptor);
+    }
+
+    public TableExecuteNode tableExecute(List<Symbol> columns, List<String> columnNames, PlanNode source)
+    {
+        return tableExecute(columns, columnNames, Optional.empty(), Optional.empty(), source);
+    }
+
+    public TableExecuteNode tableExecute(
+            List<Symbol> columns,
+            List<String> columnNames,
+            Optional<PartitioningScheme> partitioningScheme,
+            Optional<PartitioningScheme> preferredPartitioningScheme,
+            PlanNode source)
+    {
+        return new TableExecuteNode(
+                idAllocator.getNextId(),
+                source,
+                new TableWriterNode.TableExecuteTarget(
+                        new TableExecuteHandle(
+                                new CatalogName("testConnector"),
+                                TestingTransactionHandle.create(),
+                                new TestingTableExecuteHandle()),
+                        Optional.empty(),
+                        SchemaTableName.schemaTableName("testschema", "testtable")),
+                symbol("partialrows", BIGINT),
+                symbol("fragment", VARBINARY),
+                columns,
+                columnNames,
+                partitioningScheme,
+                preferredPartitioningScheme);
     }
 
     public PartitioningScheme partitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols, Symbol hashSymbol)

@@ -13,7 +13,6 @@
  */
 package io.trino.metadata;
 
-import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -21,6 +20,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.UncheckedExecutionException;
+import io.trino.FeaturesConfig;
+import io.trino.collect.cache.NonEvictableCache;
+import io.trino.operator.aggregation.AggregationMetadata;
 import io.trino.operator.aggregation.ApproximateCountDistinctAggregation;
 import io.trino.operator.aggregation.ApproximateDoublePercentileAggregations;
 import io.trino.operator.aggregation.ApproximateDoublePercentileArrayAggregations;
@@ -49,7 +51,6 @@ import io.trino.operator.aggregation.DoubleHistogramAggregation;
 import io.trino.operator.aggregation.DoubleRegressionAggregation;
 import io.trino.operator.aggregation.DoubleSumAggregation;
 import io.trino.operator.aggregation.GeometricMeanAggregations;
-import io.trino.operator.aggregation.InternalAggregationFunction;
 import io.trino.operator.aggregation.IntervalDayToSecondAverageAggregation;
 import io.trino.operator.aggregation.IntervalDayToSecondSumAggregation;
 import io.trino.operator.aggregation.IntervalYearToMonthAverageAggregation;
@@ -103,6 +104,8 @@ import io.trino.operator.scalar.ArrayShuffleFunction;
 import io.trino.operator.scalar.ArraySliceFunction;
 import io.trino.operator.scalar.ArraySortComparatorFunction;
 import io.trino.operator.scalar.ArraySortFunction;
+import io.trino.operator.scalar.ArrayToArrayCast;
+import io.trino.operator.scalar.ArrayTrimFunction;
 import io.trino.operator.scalar.ArrayUnionFunction;
 import io.trino.operator.scalar.ArraysOverlapFunction;
 import io.trino.operator.scalar.BitwiseFunctions;
@@ -126,6 +129,7 @@ import io.trino.operator.scalar.GenericLessThanOrEqualOperator;
 import io.trino.operator.scalar.GenericXxHash64Operator;
 import io.trino.operator.scalar.HmacFunctions;
 import io.trino.operator.scalar.HyperLogLogFunctions;
+import io.trino.operator.scalar.IpAddressFunctions;
 import io.trino.operator.scalar.JoniRegexpCasts;
 import io.trino.operator.scalar.JoniRegexpFunctions;
 import io.trino.operator.scalar.JoniRegexpReplaceLambdaFunction;
@@ -240,7 +244,6 @@ import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.TypeOperators;
 import io.trino.sql.DynamicFilters;
-import io.trino.sql.analyzer.FeaturesConfig;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.type.BigintOperators;
 import io.trino.type.BlockTypeOperators;
@@ -272,12 +275,14 @@ import javax.annotation.concurrent.ThreadSafe;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutionException;
-import java.util.function.Supplier;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
+import static io.trino.collect.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.metadata.FunctionKind.AGGREGATE;
 import static io.trino.metadata.Signature.isOperatorName;
 import static io.trino.metadata.Signature.unmangleOperator;
@@ -303,7 +308,6 @@ import static io.trino.operator.scalar.ArrayJoin.ARRAY_JOIN;
 import static io.trino.operator.scalar.ArrayJoin.ARRAY_JOIN_WITH_NULL_REPLACEMENT;
 import static io.trino.operator.scalar.ArrayReduceFunction.ARRAY_REDUCE_FUNCTION;
 import static io.trino.operator.scalar.ArraySubscriptOperator.ARRAY_SUBSCRIPT;
-import static io.trino.operator.scalar.ArrayToArrayCast.ARRAY_TO_ARRAY_CAST;
 import static io.trino.operator.scalar.ArrayToElementConcatFunction.ARRAY_TO_ELEMENT_CONCAT_FUNCTION;
 import static io.trino.operator.scalar.ArrayToJsonCast.ARRAY_TO_JSON;
 import static io.trino.operator.scalar.ArrayToJsonCast.LEGACY_ARRAY_TO_JSON;
@@ -339,7 +343,6 @@ import static io.trino.operator.scalar.RowToRowCast.ROW_TO_ROW_CAST;
 import static io.trino.operator.scalar.TryCastFunction.TRY_CAST;
 import static io.trino.operator.scalar.ZipFunction.ZIP_FUNCTIONS;
 import static io.trino.operator.scalar.ZipWithFunction.ZIP_WITH_FUNCTION;
-import static io.trino.operator.window.AggregateWindowFunction.supplier;
 import static io.trino.type.DecimalCasts.BIGINT_TO_DECIMAL_CAST;
 import static io.trino.type.DecimalCasts.BOOLEAN_TO_DECIMAL_CAST;
 import static io.trino.type.DecimalCasts.DECIMAL_TO_BIGINT_CAST;
@@ -373,18 +376,19 @@ import static io.trino.type.DecimalSaturatedFloorCasts.INTEGER_TO_DECIMAL_SATURA
 import static io.trino.type.DecimalSaturatedFloorCasts.SMALLINT_TO_DECIMAL_SATURATED_FLOOR_CAST;
 import static io.trino.type.DecimalSaturatedFloorCasts.TINYINT_TO_DECIMAL_SATURATED_FLOOR_CAST;
 import static io.trino.type.DecimalToDecimalCasts.DECIMAL_TO_DECIMAL_CAST;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.HOURS;
 
 @ThreadSafe
 public class FunctionRegistry
 {
-    private final Cache<FunctionBinding, ScalarFunctionImplementation> specializedScalarCache;
-    private final Cache<FunctionBinding, InternalAggregationFunction> specializedAggregationCache;
-    private final Cache<FunctionBinding, WindowFunctionSupplier> specializedWindowCache;
+    private final NonEvictableCache<FunctionKey, ScalarFunctionImplementation> specializedScalarCache;
+    private final NonEvictableCache<FunctionKey, AggregationMetadata> specializedAggregationCache;
+    private final NonEvictableCache<FunctionKey, WindowFunctionSupplier> specializedWindowCache;
     private volatile FunctionMap functions = new FunctionMap();
 
     public FunctionRegistry(
-            Supplier<BlockEncodingSerde> blockEncodingSerdeSupplier,
+            BlockEncodingSerde blockEncodingSerde,
             FeaturesConfig featuresConfig,
             TypeOperators typeOperators,
             BlockTypeOperators blockTypeOperators,
@@ -396,20 +400,17 @@ public class FunctionRegistry
         // with generated classes and/or dynamically-created MethodHandles.
         // This might also mitigate problems like deoptimization storm or unintended interpreted execution.
 
-        specializedScalarCache = CacheBuilder.newBuilder()
+        specializedScalarCache = buildNonEvictableCache(CacheBuilder.newBuilder()
                 .maximumSize(1000)
-                .expireAfterWrite(1, HOURS)
-                .build();
+                .expireAfterWrite(1, HOURS));
 
-        specializedAggregationCache = CacheBuilder.newBuilder()
+        specializedAggregationCache = buildNonEvictableCache(CacheBuilder.newBuilder()
                 .maximumSize(1000)
-                .expireAfterWrite(1, HOURS)
-                .build();
+                .expireAfterWrite(1, HOURS));
 
-        specializedWindowCache = CacheBuilder.newBuilder()
+        specializedWindowCache = buildNonEvictableCache(CacheBuilder.newBuilder()
                 .maximumSize(1000)
-                .expireAfterWrite(1, HOURS)
-                .build();
+                .expireAfterWrite(1, HOURS));
 
         FunctionListBuilder builder = new FunctionListBuilder()
                 .window(RowNumberFunction.class)
@@ -514,6 +515,7 @@ public class FunctionRegistry
                 .scalars(QuantileDigestOperators.class)
                 .scalars(TDigestOperators.class)
                 .scalars(IpAddressOperators.class)
+                .scalars(IpAddressFunctions.class)
                 .scalars(UuidOperators.class)
                 .scalars(LikeFunctions.class)
                 .scalars(ArrayFunctions.class)
@@ -547,6 +549,7 @@ public class FunctionRegistry
                 .scalar(ArrayUnionFunction.class)
                 .scalar(ArrayExceptFunction.class)
                 .scalar(ArraySliceFunction.class)
+                .scalar(ArrayTrimFunction.class)
                 .scalar(ArrayCombinationsFunction.class)
                 .scalar(ArrayNgramsFunction.class)
                 .scalar(ArrayAllMatchFunction.class)
@@ -567,7 +570,7 @@ public class FunctionRegistry
                 .functions(ZIP_WITH_FUNCTION, MAP_ZIP_WITH_FUNCTION)
                 .functions(ZIP_FUNCTIONS)
                 .functions(ARRAY_JOIN, ARRAY_JOIN_WITH_NULL_REPLACEMENT)
-                .functions(ARRAY_TO_ARRAY_CAST)
+                .scalar(ArrayToArrayCast.class)
                 .functions(ARRAY_TO_ELEMENT_CONCAT_FUNCTION, ELEMENT_TO_ARRAY_CONCAT_FUNCTION)
                 .function(MAP_ELEMENT_AT)
                 .function(new MapConcatFunction(blockTypeOperators))
@@ -611,7 +614,7 @@ public class FunctionRegistry
                 .functions(MAP_FILTER_FUNCTION, new MapTransformKeysFunction(blockTypeOperators), MAP_TRANSFORM_VALUES_FUNCTION)
                 .function(FORMAT_FUNCTION)
                 .function(TRY_CAST)
-                .function(new LiteralFunction(blockEncodingSerdeSupplier))
+                .function(new LiteralFunction(blockEncodingSerde))
                 .function(new GenericEqualOperator(typeOperators))
                 .function(new GenericHashCodeOperator(typeOperators))
                 .function(new GenericXxHash64Operator(typeOperators))
@@ -830,15 +833,10 @@ public class FunctionRegistry
         return aggregationFunction.getAggregationMetadata();
     }
 
-    public WindowFunctionSupplier getWindowFunctionImplementation(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    public WindowFunctionSupplier getWindowFunctionImplementation(FunctionId functionId, BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
-        SqlFunction function = functions.get(functionBinding.getFunctionId());
         try {
-            if (function instanceof SqlAggregationFunction) {
-                InternalAggregationFunction aggregationFunction = specializedAggregationCache.get(functionBinding, () -> specializedAggregation(functionBinding, functionDependencies));
-                return supplier(function.getFunctionMetadata().getSignature(), aggregationFunction);
-            }
-            return specializedWindowCache.get(functionBinding, () -> specializeWindow(functionBinding, functionDependencies));
+            return specializedWindowCache.get(new FunctionKey(functionId, boundSignature), () -> specializeWindow(functionId, boundSignature, functionDependencies));
         }
         catch (ExecutionException | UncheckedExecutionException e) {
             throwIfInstanceOf(e.getCause(), TrinoException.class);
@@ -846,16 +844,16 @@ public class FunctionRegistry
         }
     }
 
-    private WindowFunctionSupplier specializeWindow(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    private WindowFunctionSupplier specializeWindow(FunctionId functionId, BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
-        SqlWindowFunction function = (SqlWindowFunction) functions.get(functionBinding.getFunctionId());
-        return function.specialize(functionBinding, functionDependencies);
+        SqlWindowFunction function = (SqlWindowFunction) functions.get(functionId);
+        return function.specialize(boundSignature, functionDependencies);
     }
 
-    public InternalAggregationFunction getAggregateFunctionImplementation(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    public AggregationMetadata getAggregateFunctionImplementation(FunctionId functionId, BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
         try {
-            return specializedAggregationCache.get(functionBinding, () -> specializedAggregation(functionBinding, functionDependencies));
+            return specializedAggregationCache.get(new FunctionKey(functionId, boundSignature), () -> specializedAggregation(functionId, boundSignature, functionDependencies));
         }
         catch (ExecutionException | UncheckedExecutionException e) {
             throwIfInstanceOf(e.getCause(), TrinoException.class);
@@ -863,26 +861,27 @@ public class FunctionRegistry
         }
     }
 
-    private InternalAggregationFunction specializedAggregation(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    private AggregationMetadata specializedAggregation(FunctionId functionId, BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
-        SqlAggregationFunction function = (SqlAggregationFunction) functions.get(functionBinding.getFunctionId());
-        return function.specialize(functionBinding, functionDependencies);
+        SqlAggregationFunction aggregationFunction = (SqlAggregationFunction) functions.get(functionId);
+        return aggregationFunction.specialize(boundSignature, functionDependencies);
     }
 
     public FunctionDependencyDeclaration getFunctionDependencies(FunctionBinding functionBinding)
     {
         SqlFunction function = functions.get(functionBinding.getFunctionId());
-        return function.getFunctionDependencies(functionBinding);
+        return function.getFunctionDependencies(functionBinding.getBoundSignature());
     }
 
     public FunctionInvoker getScalarFunctionInvoker(
-            FunctionBinding functionBinding,
+            FunctionId functionId,
+            BoundSignature boundSignature,
             FunctionDependencies functionDependencies,
             InvocationConvention invocationConvention)
     {
         ScalarFunctionImplementation scalarFunctionImplementation;
         try {
-            scalarFunctionImplementation = specializedScalarCache.get(functionBinding, () -> specializeScalarFunction(functionBinding, functionDependencies));
+            scalarFunctionImplementation = specializedScalarCache.get(new FunctionKey(functionId, boundSignature), () -> specializeScalarFunction(functionId, boundSignature, functionDependencies));
         }
         catch (ExecutionException | UncheckedExecutionException e) {
             throwIfInstanceOf(e.getCause(), TrinoException.class);
@@ -891,10 +890,10 @@ public class FunctionRegistry
         return scalarFunctionImplementation.getScalarFunctionInvoker(invocationConvention);
     }
 
-    private ScalarFunctionImplementation specializeScalarFunction(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    private ScalarFunctionImplementation specializeScalarFunction(FunctionId functionId, BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
-        SqlScalarFunction function = (SqlScalarFunction) functions.get(functionBinding.getFunctionId());
-        return function.specialize(functionBinding, functionDependencies);
+        SqlScalarFunction function = (SqlScalarFunction) functions.get(functionId);
+        return function.specialize(boundSignature, functionDependencies);
     }
 
     private static class FunctionMap
@@ -913,7 +912,7 @@ public class FunctionRegistry
             this.functions = ImmutableMap.<FunctionId, SqlFunction>builder()
                     .putAll(map.functions)
                     .putAll(Maps.uniqueIndex(functions, function -> function.getFunctionMetadata().getFunctionId()))
-                    .build();
+                    .buildOrThrow();
 
             ImmutableListMultimap.Builder<QualifiedName, FunctionMetadata> functionsByName = ImmutableListMultimap.<QualifiedName, FunctionMetadata>builder()
                     .putAll(map.functionsByName);
@@ -948,6 +947,57 @@ public class FunctionRegistry
             SqlFunction sqlFunction = functions.get(functionId);
             checkArgument(sqlFunction != null, "Unknown function implementation: %s", functionId);
             return sqlFunction;
+        }
+    }
+
+    private static class FunctionKey
+    {
+        private final FunctionId functionId;
+        private final BoundSignature boundSignature;
+
+        public FunctionKey(FunctionId functionId, BoundSignature boundSignature)
+        {
+            this.functionId = requireNonNull(functionId, "functionId is null");
+            this.boundSignature = requireNonNull(boundSignature, "boundSignature is null");
+        }
+
+        public FunctionId getFunctionId()
+        {
+            return functionId;
+        }
+
+        public BoundSignature getBoundSignature()
+        {
+            return boundSignature;
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            FunctionKey that = (FunctionKey) o;
+            return functionId.equals(that.functionId) &&
+                    boundSignature.equals(that.boundSignature);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hash(functionId, boundSignature);
+        }
+
+        @Override
+        public String toString()
+        {
+            return toStringHelper(this)
+                    .add("functionId", functionId)
+                    .add("boundSignature", boundSignature)
+                    .toString();
         }
     }
 }

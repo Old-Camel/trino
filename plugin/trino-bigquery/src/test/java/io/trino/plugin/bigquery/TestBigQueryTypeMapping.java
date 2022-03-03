@@ -24,6 +24,7 @@ import io.trino.testing.datatype.CreateAndInsertDataSetup;
 import io.trino.testing.datatype.DataSetup;
 import io.trino.testing.datatype.SqlDataTypeTest;
 import io.trino.testing.sql.SqlExecutor;
+import io.trino.testing.sql.TestTable;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -40,7 +41,11 @@ import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static java.lang.String.format;
 
+/**
+ * @see <a href="https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types">BigQuery data types</a>
+ */
 public class TestBigQueryTypeMapping
         extends AbstractTestQueryFramework
 {
@@ -157,13 +162,67 @@ public class TestBigQueryTypeMapping
     }
 
     @Test
+    public void testBigNumericMapping()
+    {
+        SqlDataTypeTest.create()
+                .addRoundTrip("BIGNUMERIC(3, 0)", "BIGNUMERIC '193'", createDecimalType(3, 0), "CAST(193 AS DECIMAL(3, 0))")
+                .addRoundTrip("BIGNUMERIC(3, 0)", "BIGNUMERIC '19'", createDecimalType(3, 0), "CAST(19 AS DECIMAL(3, 0))")
+                .addRoundTrip("BIGNUMERIC(3, 0)", "BIGNUMERIC '-193'", createDecimalType(3, 0), "CAST(-193 AS DECIMAL(3, 0))")
+                .addRoundTrip("BIGNUMERIC(3, 1)", "BIGNUMERIC '10.0'", createDecimalType(3, 1), "CAST(10.0 AS DECIMAL(3, 1))")
+                .addRoundTrip("BIGNUMERIC(3, 1)", "BIGNUMERIC '10.1'", createDecimalType(3, 1), "CAST(10.1 AS DECIMAL(3, 1))")
+                .addRoundTrip("BIGNUMERIC(3, 1)", "BIGNUMERIC '-10.1'", createDecimalType(3, 1), "CAST(-10.1 AS DECIMAL(3, 1))")
+                .addRoundTrip("BIGNUMERIC(4, 2)", "BIGNUMERIC '2'", createDecimalType(4, 2), "CAST(2 AS DECIMAL(4, 2))")
+                .addRoundTrip("BIGNUMERIC(4, 2)", "BIGNUMERIC '2.3'", createDecimalType(4, 2), "CAST(2.3 AS DECIMAL(4, 2))")
+                .addRoundTrip("BIGNUMERIC(24, 2)", "BIGNUMERIC '2'", createDecimalType(24, 2), "CAST(2 AS DECIMAL(24, 2))")
+                .addRoundTrip("BIGNUMERIC(24, 2)", "BIGNUMERIC '2.3'", createDecimalType(24, 2), "CAST(2.3 AS DECIMAL(24, 2))")
+                .addRoundTrip("BIGNUMERIC(24, 2)", "BIGNUMERIC '123456789.3'", createDecimalType(24, 2), "CAST(123456789.3 AS DECIMAL(24, 2))")
+                .addRoundTrip("BIGNUMERIC(24, 4)", "BIGNUMERIC '12345678901234567890.31'", createDecimalType(24, 4), "CAST(12345678901234567890.31 AS DECIMAL(24, 4))")
+                .addRoundTrip("BIGNUMERIC(29, 0)", "BIGNUMERIC '27182818284590452353602874713'", createDecimalType(29, 0), "CAST('27182818284590452353602874713' AS DECIMAL(29, 0))")
+                .addRoundTrip("BIGNUMERIC(29, 0)", "BIGNUMERIC '-27182818284590452353602874713'", createDecimalType(29, 0), "CAST('-27182818284590452353602874713' AS DECIMAL(29, 0))")
+                .addRoundTrip("BIGNUMERIC(30, 5)", "BIGNUMERIC '3141592653589793238462643.38327'", createDecimalType(30, 5), "CAST(3141592653589793238462643.38327 AS DECIMAL(30, 5))")
+                .addRoundTrip("BIGNUMERIC(30, 5)", "BIGNUMERIC '-3141592653589793238462643.38327'", createDecimalType(30, 5), "CAST(-3141592653589793238462643.38327 AS DECIMAL(30, 5))")
+                .addRoundTrip("BIGNUMERIC(38, 9)", "BIGNUMERIC '100000000020000000001234567.123456789'", createDecimalType(38, 9), "CAST(100000000020000000001234567.123456789 AS DECIMAL(38, 9))")
+                .addRoundTrip("BIGNUMERIC(38, 9)", "BIGNUMERIC '-100000000020000000001234567.123456789'", createDecimalType(38, 9), "CAST(-100000000020000000001234567.123456789 AS DECIMAL(38, 9))")
+                .addRoundTrip("BIGNUMERIC(10, 3)", "CAST(NULL AS BIGNUMERIC)", createDecimalType(10, 3), "CAST(NULL AS DECIMAL(10, 3))")
+                .addRoundTrip("BIGNUMERIC(38, 9)", "CAST(NULL AS BIGNUMERIC)", createDecimalType(38, 9), "CAST(NULL AS DECIMAL(38, 9))")
+                .addRoundTrip("BIGNUMERIC(1)", "BIGNUMERIC '1'", createDecimalType(1, 0), "CAST(1 AS DECIMAL(1, 0))")
+                .addRoundTrip("BIGNUMERIC(1)", "BIGNUMERIC '-1'", createDecimalType(1, 0), "CAST(-1 AS DECIMAL(1, 0))")
+                .addRoundTrip("BIGNUMERIC(38)", "BIGNUMERIC '10000000002000000000300000000012345678'", createDecimalType(38, 0), "CAST('10000000002000000000300000000012345678' AS DECIMAL(38, 0))")
+                .addRoundTrip("BIGNUMERIC(38)", "BIGNUMERIC '-10000000002000000000300000000012345678'", createDecimalType(38, 0), "CAST('-10000000002000000000300000000012345678' AS DECIMAL(38, 0))")
+                .execute(getQueryRunner(), bigqueryCreateAndInsert("test.bignumeric"));
+    }
+
+    @Test(dataProvider = "bigqueryUnsupportedBigNumericTypeProvider")
+    public void testUnsupportedBigNumericMapping(String unsupportedTypeName)
+    {
+        try (TestTable table = new TestTable(getBigQuerySqlExecutor(), "test.unsupported_bignumeric", format("(supported_column INT64, unsupported_column %s)", unsupportedTypeName))) {
+            assertQuery(
+                    "DESCRIBE " + table.getName(),
+                    "VALUES ('supported_column', 'bigint', '', '')");
+        }
+    }
+
+    @DataProvider
+    public Object[][] bigqueryUnsupportedBigNumericTypeProvider()
+    {
+        return new Object[][] {
+                {"BIGNUMERIC"},
+                {"BIGNUMERIC(40,2)"},
+        };
+    }
+
+    @Test
     public void testDate()
     {
         SqlDataTypeTest.create()
                 .addRoundTrip("date", "NULL", DATE, "CAST(NULL AS DATE)")
-                .addRoundTrip("date", "DATE '0001-01-01'", DATE, "DATE '0001-01-01'")
+                .addRoundTrip("date", "DATE '0001-01-01'", DATE, "DATE '0001-01-01'") // min value in BigQuery
                 .addRoundTrip("date", "DATE '0012-12-12'", DATE, "DATE '0012-12-12'")
                 .addRoundTrip("date", "DATE '1500-01-01'", DATE, "DATE '1500-01-01'")
+                .addRoundTrip("date", "DATE '1582-10-04'", DATE, "DATE '1582-10-04'")
+                .addRoundTrip("date", "DATE '1582-10-05'", DATE, "DATE '1582-10-05'") // begin julian->gregorian switch
+                .addRoundTrip("date", "DATE '1582-10-14'", DATE, "DATE '1582-10-14'") // end julian->gregorian switch
+                .addRoundTrip("date", "DATE '1582-10-15'", DATE, "DATE '1582-10-15'")
                 .addRoundTrip("date", "DATE '1952-04-03'", DATE, "DATE '1952-04-03'")
                 .addRoundTrip("date", "DATE '1970-01-01'", DATE, "DATE '1970-01-01'")
                 .addRoundTrip("date", "DATE '1970-02-03'", DATE, "DATE '1970-02-03'")
@@ -172,7 +231,7 @@ public class TestBigQueryTypeMapping
                 .addRoundTrip("date", "DATE '1983-10-01'", DATE, "DATE '1983-10-01'")
                 .addRoundTrip("date", "DATE '2017-07-01'", DATE, "DATE '2017-07-01'")
                 .addRoundTrip("date", "DATE '2017-01-01'", DATE, "DATE '2017-01-01'")
-                .addRoundTrip("date", "DATE '9999-12-31'", DATE, "DATE '9999-12-31'")
+                .addRoundTrip("date", "DATE '9999-12-31'", DATE, "DATE '9999-12-31'") // max value in BigQuery
                 .execute(getQueryRunner(), bigqueryCreateAndInsert("test.date"));
     }
 
@@ -180,6 +239,8 @@ public class TestBigQueryTypeMapping
     public void testDatetime()
     {
         SqlDataTypeTest.create()
+                // min value in BigQuery
+                .addRoundTrip("datetime", "datetime '0001-01-01 00:00:00.000'", createTimestampType(6), "TIMESTAMP '0001-01-01 00:00:00.000000'")
                 // before epoch
                 .addRoundTrip("datetime", "datetime '1958-01-01 13:18:03.123'", createTimestampType(6), "TIMESTAMP '1958-01-01 13:18:03.123000'")
                 // after epoch
@@ -219,6 +280,9 @@ public class TestBigQueryTypeMapping
                 .addRoundTrip("datetime", "datetime '1969-12-31 23:59:59.999949'", createTimestampType(6), "TIMESTAMP '1969-12-31 23:59:59.999949'")
                 .addRoundTrip("datetime", "datetime '1969-12-31 23:59:59.999994'", createTimestampType(6), "TIMESTAMP '1969-12-31 23:59:59.999994'")
 
+                // max value in BigQuery
+                .addRoundTrip("datetime", "datetime '9999-12-31 23:59:59.999999'", createTimestampType(6), "TIMESTAMP '9999-12-31 23:59:59.999999'")
+
                 .execute(getQueryRunner(), bigqueryCreateAndInsert("test.datetime"));
     }
 
@@ -248,6 +312,9 @@ public class TestBigQueryTypeMapping
     public void testTimestampWithTimeZone()
     {
         SqlDataTypeTest.create()
+                // min value in BigQuery
+                .addRoundTrip("TIMESTAMP", "TIMESTAMP '0001-01-01 00:00:00.000000 UTC'",
+                        TIMESTAMP_TZ_MICROS, "TIMESTAMP '0001-01-01 00:00:00.000000 UTC'")
                 .addRoundTrip("TIMESTAMP", "TIMESTAMP '1970-01-01 00:00:00.000000 UTC'",
                         TIMESTAMP_TZ_MICROS, "TIMESTAMP '1970-01-01 00:00:00.000000 UTC'")
                 .addRoundTrip("TIMESTAMP", "TIMESTAMP '1970-01-01 00:00:00.000000 Asia/Kathmandu'",
@@ -274,6 +341,9 @@ public class TestBigQueryTypeMapping
                         TIMESTAMP_TZ_MICROS, "TIMESTAMP '2019-03-18 17:32:17.987000 UTC'")
                 .addRoundTrip("TIMESTAMP", "TIMESTAMP '2021-09-07 23:59:59.999999-00:00'",
                         TIMESTAMP_TZ_MICROS, "TIMESTAMP '2021-09-07 23:59:59.999999 UTC'")
+                // max value in BigQuery
+                .addRoundTrip("TIMESTAMP", "TIMESTAMP '9999-12-31 23:59:59.999999-00:00'",
+                        TIMESTAMP_TZ_MICROS, "TIMESTAMP '9999-12-31 23:59:59.999999 UTC'")
                 .execute(getQueryRunner(), bigqueryCreateAndInsert("test.timestamp_tz"));
     }
 

@@ -52,6 +52,7 @@ import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.statistics.TableStatisticsMetadata;
+import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import io.trino.tpch.Distributions;
@@ -197,7 +198,7 @@ public class TpchMetadata
             return null;
         }
 
-        return new TpchTableHandle(tableName.getTableName(), scaleFactor);
+        return new TpchTableHandle(tableName.getSchemaName(), tableName.getTableName(), scaleFactor);
     }
 
     @Override
@@ -220,9 +221,8 @@ public class TpchMetadata
         TpchTableHandle tpchTableHandle = (TpchTableHandle) tableHandle;
 
         TpchTable<?> tpchTable = TpchTable.getTable(tpchTableHandle.getTableName());
-        String schemaName = scaleFactorSchemaName(tpchTableHandle.getScaleFactor());
 
-        return getTableMetadata(schemaName, tpchTable, columnNaming);
+        return getTableMetadata(tpchTableHandle.getSchemaName(), tpchTable, columnNaming);
     }
 
     private ConnectorTableMetadata getTableMetadata(String schemaName, TpchTable<?> tpchTable, ColumnNaming columnNaming)
@@ -252,7 +252,7 @@ public class TpchMetadata
         for (ColumnMetadata columnMetadata : getTableMetadata(session, tableHandle).getColumns()) {
             builder.put(columnMetadata.getName(), new TpchColumnHandle(columnMetadata.getName(), columnMetadata.getType()));
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     @Override
@@ -267,7 +267,7 @@ public class TpchMetadata
                 }
             }
         }
-        return tableColumns.build();
+        return tableColumns.buildOrThrow();
     }
 
     @Override
@@ -369,7 +369,7 @@ public class TpchMetadata
             if (columnType.equals(BIGINT) || columnType.equals(INTEGER) || columnType.equals(DATE)) {
                 return ((Number) value).longValue();
             }
-            if (columnType.equals(DOUBLE)) {
+            if (columnType.equals(DOUBLE) || columnType instanceof DecimalType) {
                 return ((Number) value).doubleValue();
             }
         }
@@ -425,12 +425,6 @@ public class TpchMetadata
             }
         }
         return builder.build();
-    }
-
-    @Override
-    public boolean usesLegacyTableLayouts()
-    {
-        return false;
     }
 
     @Override
@@ -519,6 +513,7 @@ public class TpchMetadata
 
         return Optional.of(new ConstraintApplicationResult<>(
                 new TpchTableHandle(
+                        handle.getSchemaName(),
                         handle.getTableName(),
                         handle.getScaleFactor(),
                         oldDomain.intersect(predicate)),
@@ -536,7 +531,7 @@ public class TpchMetadata
 
         CatalogSchemaTableName destinationTable = new CatalogSchemaTableName(
                 destinationCatalog.get(),
-                destinationSchema.orElse(scaleFactorSchemaName(handle.getScaleFactor())),
+                destinationSchema.orElse(handle.getSchemaName()),
                 handle.getTableName());
         return Optional.of(
                 new TableScanRedirectApplicationResult(
@@ -568,11 +563,6 @@ public class TpchMetadata
             return ImmutableList.of(schemaName.get());
         }
         return ImmutableList.of();
-    }
-
-    private static String scaleFactorSchemaName(double scaleFactor)
-    {
-        return "sf" + scaleFactor;
     }
 
     public static double schemaNameToScaleFactor(String schemaName)

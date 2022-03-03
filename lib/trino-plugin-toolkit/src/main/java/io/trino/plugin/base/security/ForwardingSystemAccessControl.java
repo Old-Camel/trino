@@ -18,6 +18,7 @@ import io.trino.spi.connector.CatalogSchemaRoutineName;
 import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.eventlistener.EventListener;
+import io.trino.spi.security.Identity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.SystemAccessControl;
 import io.trino.spi.security.SystemSecurityContext;
@@ -26,6 +27,7 @@ import io.trino.spi.security.ViewExpression;
 import io.trino.spi.type.Type;
 
 import java.security.Principal;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -82,15 +84,33 @@ public abstract class ForwardingSystemAccessControl
     }
 
     @Override
+    public void checkCanViewQueryOwnedBy(SystemSecurityContext context, Identity queryOwner)
+    {
+        delegate().checkCanViewQueryOwnedBy(context, queryOwner);
+    }
+
+    @Override
     public void checkCanViewQueryOwnedBy(SystemSecurityContext context, String queryOwner)
     {
         delegate().checkCanViewQueryOwnedBy(context, queryOwner);
     }
 
     @Override
+    public Collection<Identity> filterViewQueryOwnedBy(SystemSecurityContext context, Collection<Identity> queryOwners)
+    {
+        return delegate().filterViewQueryOwnedBy(context, queryOwners);
+    }
+
+    @Override
     public Set<String> filterViewQueryOwnedBy(SystemSecurityContext context, Set<String> queryOwners)
     {
         return delegate().filterViewQueryOwnedBy(context, queryOwners);
+    }
+
+    @Override
+    public void checkCanKillQueryOwnedBy(SystemSecurityContext context, Identity queryOwner)
+    {
+        delegate().checkCanKillQueryOwnedBy(context, queryOwner);
     }
 
     @Override
@@ -166,12 +186,6 @@ public abstract class ForwardingSystemAccessControl
     }
 
     @Override
-    public void checkCanCreateTable(SystemSecurityContext context, CatalogSchemaTableName table)
-    {
-        delegate().checkCanCreateTable(context, table);
-    }
-
-    @Override
     public void checkCanCreateTable(SystemSecurityContext context, CatalogSchemaTableName table, Map<String, Object> properties)
     {
         delegate().checkCanCreateTable(context, table, properties);
@@ -190,7 +204,7 @@ public abstract class ForwardingSystemAccessControl
     }
 
     @Override
-    public void checkCanSetTableProperties(SystemSecurityContext context, CatalogSchemaTableName table, Map<String, Object> properties)
+    public void checkCanSetTableProperties(SystemSecurityContext context, CatalogSchemaTableName table, Map<String, Optional<Object>> properties)
     {
         delegate().checkCanSetTableProperties(context, table, properties);
     }
@@ -274,6 +288,12 @@ public abstract class ForwardingSystemAccessControl
     }
 
     @Override
+    public void checkCanTruncateTable(SystemSecurityContext context, CatalogSchemaTableName table)
+    {
+        delegate().checkCanTruncateTable(context, table);
+    }
+
+    @Override
     public void checkCanUpdateTableColumns(SystemSecurityContext context, CatalogSchemaTableName table, Set<String> updatedColumnNames)
     {
         delegate().checkCanUpdateTableColumns(context, table, updatedColumnNames);
@@ -310,9 +330,9 @@ public abstract class ForwardingSystemAccessControl
     }
 
     @Override
-    public void checkCanCreateMaterializedView(SystemSecurityContext context, CatalogSchemaTableName materializedView)
+    public void checkCanCreateMaterializedView(SystemSecurityContext context, CatalogSchemaTableName materializedView, Map<String, Object> properties)
     {
-        delegate().checkCanCreateMaterializedView(context, materializedView);
+        delegate().checkCanCreateMaterializedView(context, materializedView, properties);
     }
 
     @Override
@@ -334,6 +354,12 @@ public abstract class ForwardingSystemAccessControl
     }
 
     @Override
+    public void checkCanSetMaterializedViewProperties(SystemSecurityContext context, CatalogSchemaTableName materializedView, Map<String, Optional<Object>> properties)
+    {
+        delegate().checkCanSetMaterializedViewProperties(context, materializedView, properties);
+    }
+
+    @Override
     public void checkCanGrantExecuteFunctionPrivilege(SystemSecurityContext context, String functionName, TrinoPrincipal grantee, boolean grantOption)
     {
         delegate().checkCanGrantExecuteFunctionPrivilege(context, functionName, grantee, grantOption);
@@ -352,6 +378,12 @@ public abstract class ForwardingSystemAccessControl
     }
 
     @Override
+    public void checkCanDenySchemaPrivilege(SystemSecurityContext context, Privilege privilege, CatalogSchemaName schema, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenySchemaPrivilege(context, privilege, schema, grantee);
+    }
+
+    @Override
     public void checkCanRevokeSchemaPrivilege(SystemSecurityContext context, Privilege privilege, CatalogSchemaName schema, TrinoPrincipal revokee, boolean grantOption)
     {
         delegate().checkCanRevokeSchemaPrivilege(context, privilege, schema, revokee, grantOption);
@@ -361,6 +393,12 @@ public abstract class ForwardingSystemAccessControl
     public void checkCanGrantTablePrivilege(SystemSecurityContext context, Privilege privilege, CatalogSchemaTableName table, TrinoPrincipal grantee, boolean grantOption)
     {
         delegate().checkCanGrantTablePrivilege(context, privilege, table, grantee, grantOption);
+    }
+
+    @Override
+    public void checkCanDenyTablePrivilege(SystemSecurityContext context, Privilege privilege, CatalogSchemaTableName table, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenyTablePrivilege(context, privilege, table, grantee);
     }
 
     @Override

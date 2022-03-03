@@ -28,6 +28,7 @@ import java.util.function.Function;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.plugin.iceberg.IcebergQueryRunner.createIcebergQueryRunner;
 import static io.trino.testing.MaterializedResult.DEFAULT_PRECISION;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
 
 public class TestIcebergSystemTables
@@ -67,17 +68,17 @@ public class TestIcebergSystemTables
     {
         assertQuery("SELECT count(*) FROM test_schema.test_table", "VALUES 6");
         assertQuery("SHOW COLUMNS FROM test_schema.\"test_table$partitions\"",
-                "VALUES ('_date', 'date', '', '')," +
-                        "('row_count', 'bigint', '', '')," +
+                "VALUES ('partition', 'row(_date date)', '', '')," +
+                        "('record_count', 'bigint', '', '')," +
                         "('file_count', 'bigint', '', '')," +
                         "('total_size', 'bigint', '', '')," +
-                        "('_bigint', 'row(min bigint, max bigint, null_count bigint)', '', '')");
+                        "('data', 'row(_bigint row(min bigint, max bigint, null_count bigint))', '', '')");
 
         MaterializedResult result = computeActual("SELECT * from test_schema.\"test_table$partitions\"");
         assertEquals(result.getRowCount(), 3);
 
         Map<LocalDate, MaterializedRow> rowsByPartition = result.getMaterializedRows().stream()
-                .collect(toImmutableMap(row -> (LocalDate) row.getField(0), Function.identity()));
+                .collect(toImmutableMap(row -> ((LocalDate) ((MaterializedRow) row.getField(0)).getField(0)), Function.identity()));
 
         // Test if row counts are computed correctly
         assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-08")).getField(1), 1L);
@@ -85,9 +86,36 @@ public class TestIcebergSystemTables
         assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-10")).getField(1), 2L);
 
         // Test if min/max values and null value count are computed correctly.
-        assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-08")).getField(4), new MaterializedRow(DEFAULT_PRECISION, 0L, 0L, 0L));
-        assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-09")).getField(4), new MaterializedRow(DEFAULT_PRECISION, 1L, 3L, 0L));
-        assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-10")).getField(4), new MaterializedRow(DEFAULT_PRECISION, 4L, 5L, 0L));
+        assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-08")).getField(4), new MaterializedRow(DEFAULT_PRECISION, new MaterializedRow(DEFAULT_PRECISION, 0L, 0L, 0L)));
+        assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-09")).getField(4), new MaterializedRow(DEFAULT_PRECISION, new MaterializedRow(DEFAULT_PRECISION, 1L, 3L, 0L)));
+        assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-10")).getField(4), new MaterializedRow(DEFAULT_PRECISION, new MaterializedRow(DEFAULT_PRECISION, 4L, 5L, 0L)));
+    }
+
+    @Test
+    public void testPartitionTableOnDropColumn()
+    {
+        assertUpdate("CREATE TABLE test_schema.test_table_multi_column (_varchar VARCHAR, _bigint BIGINT, _date DATE) WITH (partitioning = ARRAY['_date'])");
+        assertUpdate("INSERT INTO test_schema.test_table_multi_column VALUES ('a', 0, CAST('2019-09-08' AS DATE)), ('a', 1, CAST('2019-09-09' AS DATE)), ('b', 2, CAST('2019-09-09' AS DATE))", 3);
+        assertUpdate("INSERT INTO test_schema.test_table_multi_column VALUES ('c', 3, CAST('2019-09-09' AS DATE)), ('a', 4, CAST('2019-09-10' AS DATE)), ('b', 5, CAST('2019-09-10' AS DATE))", 3);
+        assertQuery("SELECT count(*) FROM test_schema.test_table_multi_column", "VALUES 6");
+        MaterializedResult result = computeActual("SELECT * from test_schema.\"test_table_multi_column$partitions\"");
+
+        assertEquals(result.getRowCount(), 3);
+        Map<LocalDate, MaterializedRow> rowsByPartition = result.getMaterializedRows().stream()
+                .collect(toImmutableMap(row -> ((LocalDate) ((MaterializedRow) row.getField(0)).getField(0)), Function.identity()));
+
+        assertEquals(rowsByPartition.get(LocalDate.parse("2019-09-08")).getField(4), new MaterializedRow(DEFAULT_PRECISION,
+                new MaterializedRow(DEFAULT_PRECISION, "a", "a", 0L),
+                new MaterializedRow(DEFAULT_PRECISION, 0L, 0L, 0L)));
+
+        assertUpdate("ALTER TABLE test_schema.test_table_multi_column drop column _varchar");
+        MaterializedResult resultAfterDrop = computeActual("SELECT * from test_schema.\"test_table_multi_column$partitions\"");
+        assertEquals(resultAfterDrop.getRowCount(), 3);
+        Map<LocalDate, MaterializedRow> rowsByPartitionAfterDrop = resultAfterDrop.getMaterializedRows().stream()
+                .collect(toImmutableMap(row -> ((LocalDate) ((MaterializedRow) row.getField(0)).getField(0)), Function.identity()));
+        assertEquals(rowsByPartitionAfterDrop.get(LocalDate.parse("2019-09-08")).getField(4), new MaterializedRow(DEFAULT_PRECISION,
+                new MaterializedRow(DEFAULT_PRECISION, 0L, 0L, 0L)));
+        assertUpdate("DROP TABLE IF EXISTS test_schema.test_table_multi_column");
     }
 
     @Test
@@ -129,10 +157,17 @@ public class TestIcebergSystemTables
                         "('added_data_files_count', 'integer', '', '')," +
                         "('existing_data_files_count', 'integer', '', '')," +
                         "('deleted_data_files_count', 'integer', '', '')," +
-                        "('partitions', 'array(row(contains_null boolean, lower_bound varchar, upper_bound varchar))', '', '')");
+                        "('partitions', 'array(row(contains_null boolean, contains_nan boolean, lower_bound varchar, upper_bound varchar))', '', '')");
         assertQuerySucceeds("SELECT * FROM test_schema.\"test_table$manifests\"");
+        assertThat(query("SELECT partitions FROM test_schema.\"test_table$manifests\""))
+                .matches("VALUES " +
+                        "    CAST(ARRAY[ROW(false, false, '2019-09-08', '2019-09-09')] AS array(row(contains_null boolean, contains_nan boolean, lower_bound varchar, upper_bound varchar))) , " +
+                        "    CAST(ARRAY[ROW(false, false, '2019-09-09', '2019-09-10')] AS array(row(contains_null boolean, contains_nan boolean, lower_bound varchar, upper_bound varchar)))");
 
         assertQuerySucceeds("SELECT * FROM test_schema.\"test_table_multilevel_partitions$manifests\"");
+        assertThat(query("SELECT partitions FROM test_schema.\"test_table_multilevel_partitions$manifests\""))
+                .matches("VALUES " +
+                        "    CAST(ARRAY[ROW(false, false, '0', '1'), ROW(false, false, '2019-09-08', '2019-09-09')] AS array(row(contains_null boolean, contains_nan boolean, lower_bound varchar, upper_bound varchar)))");
     }
 
     @Test

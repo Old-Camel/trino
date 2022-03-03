@@ -22,6 +22,8 @@ import io.trino.connector.MockConnectorFactory;
 import io.trino.connector.MockConnectorPlugin;
 import io.trino.plugin.blackhole.BlackHolePlugin;
 import io.trino.plugin.tpch.TpchPlugin;
+import io.trino.spi.connector.ConnectorViewDefinition;
+import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.RoleGrant;
 import io.trino.spi.security.SelectedRole;
@@ -29,6 +31,7 @@ import io.trino.spi.security.TrinoPrincipal;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
+import io.trino.testing.TestingAccessControlManager.TestingPrivilege;
 import io.trino.testing.TestingSession;
 import org.testng.annotations.Test;
 
@@ -37,6 +40,7 @@ import java.util.Optional;
 import static io.trino.SystemSessionProperties.QUERY_MAX_MEMORY;
 import static io.trino.spi.security.PrincipalType.USER;
 import static io.trino.spi.security.SelectedRole.Type.ROLE;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.ADD_COLUMN;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.CREATE_MATERIALIZED_VIEW;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.CREATE_TABLE;
@@ -57,6 +61,7 @@ import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.SET_USER;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.SHOW_COLUMNS;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.SHOW_CREATE_TABLE;
+import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.TRUNCATE_TABLE;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.UPDATE_TABLE;
 import static io.trino.testing.TestingAccessControlManager.privilege;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -83,6 +88,27 @@ public class TestAccessControl
         queryRunner.installPlugin(new TpchPlugin());
         queryRunner.createCatalog("tpch", "tpch");
         queryRunner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                .withGetViews((connectorSession, prefix) -> {
+                    ConnectorViewDefinition definitionRunAsDefiner = new ConnectorViewDefinition(
+                            "select 1",
+                            Optional.of("mock"),
+                            Optional.of("default"),
+                            ImmutableList.of(new ConnectorViewDefinition.ViewColumn("test", BIGINT.getTypeId())),
+                            Optional.of("comment"),
+                            Optional.of("admin"),
+                            false);
+                    ConnectorViewDefinition definitionRunAsInvoker = new ConnectorViewDefinition(
+                            "select 1",
+                            Optional.of("mock"),
+                            Optional.of("default"),
+                            ImmutableList.of(new ConnectorViewDefinition.ViewColumn("test", BIGINT.getTypeId())),
+                            Optional.of("comment"),
+                            Optional.empty(),
+                            true);
+                    return ImmutableMap.of(
+                            new SchemaTableName("default", "test_view_definer"), definitionRunAsDefiner,
+                            new SchemaTableName("default", "test_view_invoker"), definitionRunAsInvoker);
+                })
                 .withListRoleGrants((connectorSession, roles, grantees, limit) -> ImmutableSet.of(new RoleGrant(new TrinoPrincipal(USER, "alice"), "alice_role", false)))
                 .build()));
         queryRunner.createCatalog("mock", "mock");
@@ -98,6 +124,7 @@ public class TestAccessControl
         assertAccessDenied("SELECT * FROM orders", "Cannot execute query", privilege("query", EXECUTE_QUERY));
         assertAccessDenied("INSERT INTO orders SELECT * FROM orders", "Cannot insert into table .*.orders.*", privilege("orders", INSERT_TABLE));
         assertAccessDenied("DELETE FROM orders", "Cannot delete from table .*.orders.*", privilege("orders", DELETE_TABLE));
+        assertAccessDenied("TRUNCATE TABLE orders", "Cannot truncate table .*.orders.*", privilege("orders", TRUNCATE_TABLE));
         assertAccessDenied("CREATE TABLE foo AS SELECT * FROM orders", "Cannot create table .*.foo.*", privilege("foo", CREATE_TABLE));
         assertAccessDenied("ALTER TABLE orders SET PROPERTIES field_length = 32", "Cannot set table properties to .*.orders.*", privilege("orders", SET_TABLE_PROPERTIES));
         assertAccessDenied("SELECT * FROM nation", "Cannot select from columns \\[nationkey, regionkey, name, comment] in table .*.nation.*", privilege("nation.nationkey", SELECT_COLUMN));
@@ -295,6 +322,19 @@ public class TestAccessControl
     }
 
     @Test
+    public void testFunctionAccessControl()
+    {
+        assertAccessDenied(
+                "SELECT reverse('a')",
+                "Cannot execute function reverse",
+                new TestingPrivilege(Optional.empty(), "reverse", EXECUTE_FUNCTION));
+
+        TestingPrivilege denyNonReverseFunctionCalls = new TestingPrivilege(Optional.empty(), name -> !name.equals("reverse"), EXECUTE_FUNCTION);
+        assertAccessAllowed("SELECT reverse('a')", denyNonReverseFunctionCalls);
+        assertAccessDenied("SELECT concat('a', 'b')", "Cannot execute function concat", denyNonReverseFunctionCalls);
+    }
+
+    @Test
     public void testAnalyzeAccessControl()
     {
         assertAccessAllowed("ANALYZE nation");
@@ -317,6 +357,12 @@ public class TestAccessControl
         assertAccessDenied("DELETE FROM orders WHERE orderkey < 12", "Cannot select from columns \\[orderkey] in table or view .*." + "orders" + ".*", privilege("orders" + ".orderkey", SELECT_COLUMN));
         assertAccessAllowed("DELETE FROM orders WHERE orderkey < 12", privilege("orders" + ".orderdate", SELECT_COLUMN));
         assertAccessAllowed("DELETE FROM orders", privilege("orders", SELECT_COLUMN));
+    }
+
+    @Test
+    public void testTruncateAccessControl()
+    {
+        assertAccessAllowed("TRUNCATE TABLE orders", privilege("orders", SELECT_COLUMN));
     }
 
     @Test
@@ -446,5 +492,19 @@ public class TestAccessControl
         assertQueryReturnsEmptyResult("SHOW ROLE GRANTS");
         assertQueryReturnsEmptyResult("SHOW CURRENT ROLES");
         assertQueryReturnsEmptyResult("SELECT * FROM information_schema.applicable_roles");
+    }
+
+    @Test
+    public void testSetViewAuthorizationWithSecurityDefiner()
+    {
+        assertQueryFails(
+                "ALTER VIEW mock.default.test_view_definer SET AUTHORIZATION some_other_user",
+                "Cannot set authorization for view mock.default.test_view_definer to USER some_other_user: this feature is disabled");
+    }
+
+    @Test
+    public void testSetViewAuthorizationWithSecurityInvoker()
+    {
+        assertQuerySucceeds("ALTER VIEW mock.default.test_view_invoker SET AUTHORIZATION some_other_user");
     }
 }

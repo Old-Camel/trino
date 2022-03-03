@@ -24,7 +24,6 @@ import io.trino.operator.BlockedReason;
 import io.trino.spi.QueryId;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.eventlistener.StageGcStatistics;
-import io.trino.spi.memory.MemoryPoolId;
 import io.trino.spi.resourcegroups.QueryType;
 import org.joda.time.DateTime;
 import org.testng.annotations.Test;
@@ -50,7 +49,6 @@ public class TestBasicQueryInfo
                         new QueryId("0"),
                         TEST_SESSION.toSessionRepresentation(),
                         RUNNING,
-                        new MemoryPoolId("reserved"),
                         false,
                         URI.create("1"),
                         ImmutableList.of("2", "3"),
@@ -78,13 +76,11 @@ public class TestBasicQueryInfo
                                 34,
                                 19,
                                 20.0,
-                                10.0,
                                 DataSize.valueOf("21GB"),
                                 DataSize.valueOf("22GB"),
                                 DataSize.valueOf("23GB"),
                                 DataSize.valueOf("24GB"),
                                 DataSize.valueOf("25GB"),
-                                DataSize.valueOf("30GB"),
                                 DataSize.valueOf("26GB"),
                                 DataSize.valueOf("27GB"),
                                 DataSize.valueOf("28GB"),
@@ -142,7 +138,6 @@ public class TestBasicQueryInfo
 
         assertEquals(basicInfo.getQueryId().getId(), "0");
         assertEquals(basicInfo.getState(), RUNNING);
-        assertEquals(basicInfo.getMemoryPool().getId(), "reserved");
         assertEquals(basicInfo.isScheduled(), false);
         assertEquals(basicInfo.getQuery(), "SELECT 4");
         assertEquals(basicInfo.getQueryType().get(), QueryType.SELECT);
@@ -158,7 +153,6 @@ public class TestBasicQueryInfo
         assertEquals(basicInfo.getQueryStats().getCompletedDrivers(), 19);
 
         assertEquals(basicInfo.getQueryStats().getCumulativeUserMemory(), 20.0);
-        assertEquals(basicInfo.getQueryStats().getCumulativeSystemMemory(), 10.0);
         assertEquals(basicInfo.getQueryStats().getUserMemoryReservation(), DataSize.valueOf("21GB"));
         assertEquals(basicInfo.getQueryStats().getTotalMemoryReservation(), DataSize.valueOf("23GB"));
         assertEquals(basicInfo.getQueryStats().getPeakUserMemoryReservation(), DataSize.valueOf("24GB"));

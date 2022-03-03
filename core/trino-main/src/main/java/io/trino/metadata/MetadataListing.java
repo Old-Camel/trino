@@ -22,8 +22,6 @@ import io.trino.connector.CatalogName;
 import io.trino.security.AccessControl;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnMetadata;
-import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
-import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.security.GrantInfo;
@@ -39,7 +37,6 @@ import java.util.SortedSet;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.spi.StandardErrorCode.TABLE_REDIRECTION_ERROR;
 
 public final class MetadataListing
@@ -67,7 +64,7 @@ public final class MetadataListing
                             Map.Entry::getKey,
                             entry -> entry.getValue().getConnectorCatalogName()));
         }
-        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.getIdentity(), catalogNames.keySet());
+        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.toSecurityContext(), catalogNames.keySet());
 
         ImmutableSortedMap.Builder<String, CatalogName> result = ImmutableSortedMap.naturalOrder();
         for (Map.Entry<String, CatalogName> entry : catalogNames.entrySet()) {
@@ -81,7 +78,7 @@ public final class MetadataListing
     public static SortedMap<String, Catalog> getCatalogs(Session session, Metadata metadata, AccessControl accessControl)
     {
         Map<String, Catalog> catalogs = metadata.getCatalogs(session);
-        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.getIdentity(), catalogs.keySet());
+        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.toSecurityContext(), catalogs.keySet());
 
         ImmutableSortedMap.Builder<String, Catalog> result = ImmutableSortedMap.naturalOrder();
         for (Map.Entry<String, Catalog> entry : catalogs.entrySet()) {
@@ -130,9 +127,9 @@ public final class MetadataListing
         return accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), tableNames);
     }
 
-    public static Map<SchemaTableName, ConnectorViewDefinition> getViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    public static Map<SchemaTableName, ViewInfo> getViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
-        Map<SchemaTableName, ConnectorViewDefinition> views = metadata.getViews(session, prefix).entrySet().stream()
+        Map<SchemaTableName, ViewInfo> views = metadata.getViews(session, prefix).entrySet().stream()
                 .collect(toImmutableMap(entry -> entry.getKey().asSchemaTableName(), Entry::getValue));
 
         Set<SchemaTableName> accessible = accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), views.keySet());
@@ -150,9 +147,9 @@ public final class MetadataListing
         return accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), tableNames);
     }
 
-    public static Map<SchemaTableName, ConnectorMaterializedViewDefinition> getMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    public static Map<SchemaTableName, ViewInfo> getMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
-        Map<SchemaTableName, ConnectorMaterializedViewDefinition> materializedViews = metadata.getMaterializedViews(session, prefix).entrySet().stream()
+        Map<SchemaTableName, ViewInfo> materializedViews = metadata.getMaterializedViews(session, prefix).entrySet().stream()
                 .collect(toImmutableMap(entry -> entry.getKey().asSchemaTableName(), Entry::getValue));
 
         Set<SchemaTableName> accessible = accessControl.filterTables(session.toSecurityContext(), prefix.getCatalogName(), materializedViews.keySet());
@@ -177,7 +174,7 @@ public final class MetadataListing
 
     public static Map<SchemaTableName, List<ColumnMetadata>> listTableColumns(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
-        List<TableColumnsMetadata> catalogColumns = getOnlyElement(metadata.listTableColumns(session, prefix).values(), List.of());
+        List<TableColumnsMetadata> catalogColumns = metadata.listTableColumns(session, prefix);
 
         Map<SchemaTableName, Optional<List<ColumnMetadata>>> tableColumns = catalogColumns.stream()
                 .collect(toImmutableMap(TableColumnsMetadata::getTable, TableColumnsMetadata::getColumns));
@@ -247,6 +244,6 @@ public final class MetadataListing
                             .collect(toImmutableList()));
         });
 
-        return result.build();
+        return result.buildOrThrow();
     }
 }

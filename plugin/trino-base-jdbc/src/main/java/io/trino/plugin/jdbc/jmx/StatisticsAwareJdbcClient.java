@@ -46,6 +46,7 @@ import org.weakref.jmx.Managed;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
@@ -152,10 +153,10 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
-    public void abortReadConnection(Connection connection)
+    public void abortReadConnection(Connection connection, ResultSet resultSet)
             throws SQLException
     {
-        stats.getAbortReadConnection().wrap(() -> delegate().abortReadConnection(connection));
+        stats.getAbortReadConnection().wrap(() -> delegate().abortReadConnection(connection, resultSet));
     }
 
     @Override
@@ -220,7 +221,7 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
-    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Object> properties)
+    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> properties)
     {
         stats.getSetTableProperties().wrap(() -> delegate().setTableProperties(session, handle, properties));
     }
@@ -330,6 +331,12 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
+    public void renameSchema(ConnectorSession session, String schemaName, String newSchemaName)
+    {
+        stats.getRenameSchema().wrap(() -> delegate().renameSchema(session, schemaName, newSchemaName));
+    }
+
+    @Override
     public Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName)
     {
         return delegate().getSystemTable(session, tableName);
@@ -363,5 +370,11 @@ public final class StatisticsAwareJdbcClient
     public OptionalLong delete(ConnectorSession session, JdbcTableHandle handle)
     {
         return stats.getDelete().wrap(() -> delegate().delete(session, handle));
+    }
+
+    @Override
+    public void truncateTable(ConnectorSession session, JdbcTableHandle handle)
+    {
+        stats.getTruncateTable().wrap(() -> delegate().truncateTable(session, handle));
     }
 }

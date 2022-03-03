@@ -78,6 +78,9 @@ public class TestAccumuloConnectorTest
             case SUPPORTS_CREATE_VIEW:
                 return true;
 
+            case SUPPORTS_NOT_NULL_CONSTRAINT:
+                return false;
+
             default:
                 return super.hasBehavior(connectorBehavior);
         }

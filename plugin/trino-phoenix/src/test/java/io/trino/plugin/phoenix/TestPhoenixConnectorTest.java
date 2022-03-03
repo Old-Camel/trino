@@ -18,7 +18,6 @@ import com.google.common.collect.Streams;
 import io.trino.Session;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTest;
 import io.trino.plugin.jdbc.UnsupportedTypeHandling;
-import io.trino.testing.AbstractTestDistributedQueries;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.sql.SqlExecutor;
@@ -32,6 +31,7 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -77,6 +77,12 @@ public class TestPhoenixConnectorTest
 
             case SUPPORTS_RENAME_TABLE:
             case SUPPORTS_RENAME_SCHEMA:
+                return false;
+
+            case SUPPORTS_TRUNCATE:
+                return false;
+
+            case SUPPORTS_NOT_NULL_CONSTRAINT:
                 return false;
 
             default:
@@ -171,10 +177,25 @@ public class TestPhoenixConnectorTest
     }
 
     @Override
-    public void testDataMappingSmokeTest(AbstractTestDistributedQueries.DataMappingTestSetup dataMappingTestSetup)
+    protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
-        // TODO enable the test
-        throw new SkipException("test fails on Phoenix");
+        String typeName = dataMappingTestSetup.getTrinoTypeName();
+        if (typeName.equals("timestamp")
+                || typeName.equals("timestamp(3) with time zone")) {
+            return Optional.of(dataMappingTestSetup.asUnsupported());
+        }
+
+        if (typeName.equals("time")) {
+            // TODO Enable when adding support reading time column
+            return Optional.empty();
+        }
+
+        if (typeName.equals("date") && dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-05'")) {
+            // Phoenix connector returns +10 days during julian->gregorian switch. The test case exists in TestPhoenixTypeMapping.testDate().
+            return Optional.empty();
+        }
+
+        return Optional.of(dataMappingTestSetup);
     }
 
     @Override
@@ -310,6 +331,15 @@ public class TestPhoenixConnectorTest
                 "INSERT INTO test_timestamp VALUES (4, '2002-05-30 09:30:10.500')",
                 "Underlying type that is mapped to VARCHAR is not supported for INSERT: TIMESTAMP");
         assertUpdate("DROP TABLE tpch.test_timestamp");
+    }
+
+    @Test
+    public void testDefaultDecimalTable()
+            throws Exception
+    {
+        executeInPhoenix("CREATE TABLE tpch.test_null_decimal (pk bigint primary key, val1 decimal)");
+        executeInPhoenix("UPSERT INTO tpch.test_null_decimal (pk, val1) VALUES (1, 2)");
+        assertQuery("SELECT * FROM tpch.test_null_decimal", "VALUES (1, 2) ");
     }
 
     private Session withUnsupportedType(UnsupportedTypeHandling unsupportedTypeHandling)

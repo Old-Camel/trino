@@ -23,6 +23,7 @@ import io.airlift.stats.CounterStat;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
+import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.StateMachine.StateChangeListener;
 import io.trino.execution.buffer.BufferResult;
@@ -91,6 +92,7 @@ public class SqlTask
 
     private final AtomicReference<TaskHolder> taskHolderReference = new AtomicReference<>(new TaskHolder());
     private final AtomicBoolean needsPlan = new AtomicBoolean(true);
+    private final AtomicReference<String> traceToken = new AtomicReference<>();
 
     public static SqlTask createSqlTask(
             TaskId taskId,
@@ -102,9 +104,10 @@ public class SqlTask
             Consumer<SqlTask> onDone,
             DataSize maxBufferSize,
             DataSize maxBroadcastBufferSize,
+            ExchangeManagerRegistry exchangeManagerRegistry,
             CounterStat failedTasks)
     {
-        SqlTask sqlTask = new SqlTask(taskId, location, nodeId, queryContext, sqlTaskExecutionFactory, taskNotificationExecutor, maxBufferSize, maxBroadcastBufferSize);
+        SqlTask sqlTask = new SqlTask(taskId, location, nodeId, queryContext, sqlTaskExecutionFactory, taskNotificationExecutor, maxBufferSize, maxBroadcastBufferSize, exchangeManagerRegistry);
         sqlTask.initialize(onDone, failedTasks);
         return sqlTask;
     }
@@ -117,7 +120,8 @@ public class SqlTask
             SqlTaskExecutionFactory sqlTaskExecutionFactory,
             ExecutorService taskNotificationExecutor,
             DataSize maxBufferSize,
-            DataSize maxBroadcastBufferSize)
+            DataSize maxBroadcastBufferSize,
+            ExchangeManagerRegistry exchangeManagerRegistry)
     {
         this.taskId = requireNonNull(taskId, "taskId is null");
         this.taskInstanceId = UUID.randomUUID().toString();
@@ -136,8 +140,9 @@ public class SqlTask
                 maxBroadcastBufferSize,
                 // Pass a memory context supplier instead of a memory context to the output buffer,
                 // because we haven't created the task context that holds the memory context yet.
-                () -> queryContext.getTaskContextByTaskId(taskId).localSystemMemoryContext(),
-                () -> notifyStatusChanged());
+                () -> queryContext.getTaskContextByTaskId(taskId).localMemoryContext(),
+                () -> notifyStatusChanged(),
+                exchangeManagerRegistry);
         taskStateMachine = new TaskStateMachine(taskId, taskNotificationExecutor);
     }
 
@@ -177,7 +182,7 @@ public class SqlTask
             if (newState == FAILED || newState == ABORTED) {
                 // don't close buffers for a failed query
                 // closed buffers signal to upstream tasks that everything finished cleanly
-                outputBuffer.fail();
+                outputBuffer.abort();
             }
             else {
                 outputBuffer.destroy();
@@ -285,7 +290,6 @@ public class SqlTask
         long runningPartitionedSplitsWeight = 0L;
         DataSize physicalWrittenDataSize = DataSize.ofBytes(0);
         DataSize userMemoryReservation = DataSize.ofBytes(0);
-        DataSize systemMemoryReservation = DataSize.ofBytes(0);
         DataSize revocableMemoryReservation = DataSize.ofBytes(0);
         // TODO: add a mechanism to avoid sending the whole completedDriverGroups set over the wire for every task status reply
         Set<Lifespan> completedDriverGroups = ImmutableSet.of();
@@ -301,7 +305,6 @@ public class SqlTask
             runningPartitionedSplitsWeight = taskStats.getRunningPartitionedSplitsWeight();
             physicalWrittenDataSize = taskStats.getPhysicalWrittenDataSize();
             userMemoryReservation = taskStats.getUserMemoryReservation();
-            systemMemoryReservation = taskStats.getSystemMemoryReservation();
             revocableMemoryReservation = taskStats.getRevocableMemoryReservation();
             fullGcCount = taskStats.getFullGcCount();
             fullGcTime = taskStats.getFullGcTime();
@@ -319,7 +322,6 @@ public class SqlTask
             }
             physicalWrittenDataSize = succinctBytes(physicalWrittenBytes);
             userMemoryReservation = taskContext.getMemoryReservation();
-            systemMemoryReservation = taskContext.getSystemMemoryReservation();
             revocableMemoryReservation = taskContext.getRevocableMemoryReservation();
             completedDriverGroups = taskContext.getCompletedDriverGroups();
             fullGcCount = taskContext.getFullGcCount();
@@ -340,7 +342,6 @@ public class SqlTask
                 isOutputBufferOverutilized(),
                 physicalWrittenDataSize,
                 userMemoryReservation,
-                systemMemoryReservation,
                 revocableMemoryReservation,
                 fullGcCount,
                 fullGcTime,
@@ -379,10 +380,11 @@ public class SqlTask
 
     private TaskInfo createTaskInfo(TaskHolder taskHolder)
     {
+        // create task status first to prevent potentially seeing incomplete stats for a done task state
+        TaskStatus taskStatus = createTaskStatus(taskHolder);
         TaskStats taskStats = getTaskStats(taskHolder);
         Set<PlanNodeId> noMoreSplits = getNoMoreSplits(taskHolder);
 
-        TaskStatus taskStatus = createTaskStatus(taskHolder);
         return new TaskInfo(
                 taskStatus,
                 lastHeartbeat.get(),
@@ -419,11 +421,14 @@ public class SqlTask
     public TaskInfo updateTask(
             Session session,
             Optional<PlanFragment> fragment,
-            List<TaskSource> sources,
+            List<SplitAssignment> splitAssignments,
             OutputBuffers outputBuffers,
             Map<DynamicFilterId, Domain> dynamicFilterDomains)
     {
         try {
+            // trace token must be set first to make sure failure injection for getTaskResults requests works as expected
+            session.getTraceToken().ifPresent(traceToken::set);
+
             // The LazyOutput buffer does not support write methods, so the actual
             // output buffer must be established before drivers are created (e.g.
             // a VALUES query).
@@ -446,7 +451,6 @@ public class SqlTask
                             taskStateMachine,
                             outputBuffer,
                             fragment.get(),
-                            sources,
                             this::notifyStatusChanged);
                     taskHolderReference.compareAndSet(taskHolder, new TaskHolder(taskExecution));
                     needsPlan.set(false);
@@ -454,7 +458,7 @@ public class SqlTask
             }
 
             if (taskExecution != null) {
-                taskExecution.addSources(sources);
+                taskExecution.addSplitAssignments(splitAssignments);
                 taskExecution.getTaskContext().addDynamicFilter(dynamicFilterDomains);
             }
         }
@@ -484,21 +488,22 @@ public class SqlTask
         outputBuffer.acknowledge(bufferId, sequenceId);
     }
 
-    public TaskInfo abortTaskResults(OutputBufferId bufferId)
+    public TaskInfo destroyTaskResults(OutputBufferId bufferId)
     {
         requireNonNull(bufferId, "bufferId is null");
 
         log.debug("Aborting task %s output %s", taskId, bufferId);
-        outputBuffer.abort(bufferId);
+        outputBuffer.destroy(bufferId);
 
         return getTaskInfo();
     }
 
-    public void failed(Throwable cause)
+    public TaskInfo failed(Throwable cause)
     {
         requireNonNull(cause, "cause is null");
 
         taskStateMachine.failed(cause);
+        return getTaskInfo();
     }
 
     public TaskInfo cancel()
@@ -589,6 +594,11 @@ public class SqlTask
         taskStateMachine.addStateChangeListener(stateChangeListener);
     }
 
+    public void addSourceTaskFailureListener(TaskFailureListener listener)
+    {
+        taskStateMachine.addSourceTaskFailureListener(listener);
+    }
+
     public QueryContext getQueryContext()
     {
         return queryContext;
@@ -601,5 +611,10 @@ public class SqlTask
             return Optional.empty();
         }
         return Optional.of(taskExecution.getTaskContext());
+    }
+
+    public Optional<String> getTraceToken()
+    {
+        return Optional.ofNullable(traceToken.get());
     }
 }

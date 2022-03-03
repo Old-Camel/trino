@@ -124,6 +124,18 @@ In addition, Trino :doc:`provides an API </develop/system-access-control>` that
 allows you to create a custom access control method, or to extend an existing
 one.
 
+Access control can limit access to columns of a table. The default behavior
+of a query to all columns with a ``SELECT *`` statement is to show an error
+denying access to any inaccessible columns.
+
+You can change this behavior to silently hide inaccessible columns with the
+global property ``hide-inaccessible-columns`` configured in
+:ref:`config_properties`:
+
+.. code-block:: properties
+
+    hide-inaccessible-columns = true
+
 .. _security-inside-cluster:
 
 Securing inside the cluster

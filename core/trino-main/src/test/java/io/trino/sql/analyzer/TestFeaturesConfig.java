@@ -16,9 +16,10 @@ package io.trino.sql.analyzer;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
-import io.trino.sql.analyzer.FeaturesConfig.DataIntegrityVerification;
-import io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType;
-import io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy;
+import io.trino.FeaturesConfig;
+import io.trino.FeaturesConfig.DataIntegrityVerification;
+import io.trino.FeaturesConfig.JoinDistributionType;
+import io.trino.FeaturesConfig.JoinReorderingStrategy;
 import org.testng.annotations.Test;
 
 import java.util.Map;
@@ -29,8 +30,8 @@ import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinDistributionType.BROADCAST;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.NONE;
+import static io.trino.FeaturesConfig.JoinDistributionType.BROADCAST;
+import static io.trino.FeaturesConfig.JoinReorderingStrategy.NONE;
 import static io.trino.sql.analyzer.RegexLibrary.JONI;
 import static io.trino.sql.analyzer.RegexLibrary.RE2J;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -68,8 +69,6 @@ public class TestFeaturesConfig
                 .setRe2JDfaStatesLimit(Integer.MAX_VALUE)
                 .setRe2JDfaRetries(5)
                 .setSpillEnabled(false)
-                .setSpillOrderBy(true)
-                .setSpillWindowOperator(true)
                 .setAggregationOperatorUnspillMemoryLimit(DataSize.valueOf("4MB"))
                 .setSpillerSpillPaths("")
                 .setSpillerThreads(4)
@@ -103,10 +102,10 @@ public class TestFeaturesConfig
                 .setMaxGroupingSets(2048)
                 .setLateMaterializationEnabled(false)
                 .setSkipRedundantSort(true)
+                .setComplexExpressionPushdownEnabled(true)
                 .setPredicatePushdownUseTableProperties(true)
                 .setIgnoreDownstreamPreferences(false)
                 .setOmitDateTimeTypePrecision(false)
-                .setIterativeRuleBasedColumnPruning(true)
                 .setRewriteFilteringSemiJoinToInnerJoin(true)
                 .setOptimizeDuplicateInsensitiveJoins(true)
                 .setUseLegacyWindowFilterPushdown(false)
@@ -114,13 +113,15 @@ public class TestFeaturesConfig
                 .setTableScanNodePartitioningMinBucketToTaskRatio(0.5)
                 .setMergeProjectWithValues(true)
                 .setLegacyCatalogRoles(false)
-                .setDisableSetPropertiesSecurityCheckForCreateDdl(false));
+                .setIncrementalHashArrayLoadFactorEnabled(true)
+                .setHideInaccessibleColumns(false)
+                .setAllowSetViewAuthorization(false));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("cpu-cost-weight", "0.4")
                 .put("memory-cost-weight", "0.3")
                 .put("network-cost-weight", "0.2")
@@ -157,8 +158,6 @@ public class TestFeaturesConfig
                 .put("re2j.dfa-states-limit", "42")
                 .put("re2j.dfa-retries", "42")
                 .put("spill-enabled", "true")
-                .put("spill-order-by", "false")
-                .put("spill-window-operator", "false")
                 .put("aggregation-operator-unspill-memory-limit", "100MB")
                 .put("spiller-spill-path", "/tmp/custom/spill/path1,/tmp/custom/spill/path2")
                 .put("spiller-threads", "42")
@@ -182,10 +181,10 @@ public class TestFeaturesConfig
                 .put("analyzer.max-grouping-sets", "2047")
                 .put("experimental.late-materialization.enabled", "true")
                 .put("optimizer.skip-redundant-sort", "false")
+                .put("optimizer.complex-expression-pushdown.enabled", "false")
                 .put("optimizer.predicate-pushdown-use-table-properties", "false")
                 .put("optimizer.ignore-downstream-preferences", "true")
                 .put("deprecated.omit-datetime-type-precision", "true")
-                .put("optimizer.iterative-rule-based-column-pruning", "false")
                 .put("optimizer.rewrite-filtering-semi-join-to-inner-join", "false")
                 .put("optimizer.optimize-duplicate-insensitive-joins", "false")
                 .put("optimizer.use-legacy-window-filter-pushdown", "true")
@@ -193,8 +192,10 @@ public class TestFeaturesConfig
                 .put("optimizer.table-scan-node-partitioning-min-bucket-to-task-ratio", "0.0")
                 .put("optimizer.merge-project-with-values", "false")
                 .put("deprecated.legacy-catalog-roles", "true")
-                .put("deprecated.disable-set-properties-security-check-for-create-ddl", "true")
-                .build();
+                .put("incremental-hash-array-load-factor.enabled", "false")
+                .put("hide-inaccessible-columns", "true")
+                .put("legacy.allow-set-view-authorization", "true")
+                .buildOrThrow();
 
         FeaturesConfig expected = new FeaturesConfig()
                 .setCpuCostWeight(0.4)
@@ -232,8 +233,6 @@ public class TestFeaturesConfig
                 .setRe2JDfaStatesLimit(42)
                 .setRe2JDfaRetries(42)
                 .setSpillEnabled(true)
-                .setSpillOrderBy(false)
-                .setSpillWindowOperator(false)
                 .setAggregationOperatorUnspillMemoryLimit(DataSize.valueOf("100MB"))
                 .setSpillerSpillPaths("/tmp/custom/spill/path1,/tmp/custom/spill/path2")
                 .setSpillerThreads(42)
@@ -258,10 +257,10 @@ public class TestFeaturesConfig
                 .setDefaultFilterFactorEnabled(true)
                 .setLateMaterializationEnabled(true)
                 .setSkipRedundantSort(false)
+                .setComplexExpressionPushdownEnabled(false)
                 .setPredicatePushdownUseTableProperties(false)
                 .setIgnoreDownstreamPreferences(true)
                 .setOmitDateTimeTypePrecision(true)
-                .setIterativeRuleBasedColumnPruning(false)
                 .setRewriteFilteringSemiJoinToInnerJoin(false)
                 .setOptimizeDuplicateInsensitiveJoins(false)
                 .setUseLegacyWindowFilterPushdown(true)
@@ -269,7 +268,9 @@ public class TestFeaturesConfig
                 .setTableScanNodePartitioningMinBucketToTaskRatio(0.0)
                 .setMergeProjectWithValues(false)
                 .setLegacyCatalogRoles(true)
-                .setDisableSetPropertiesSecurityCheckForCreateDdl(true);
+                .setIncrementalHashArrayLoadFactorEnabled(false)
+                .setHideInaccessibleColumns(true)
+                .setAllowSetViewAuthorization(true);
         assertFullMapping(properties, expected);
     }
 }

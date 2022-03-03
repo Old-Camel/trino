@@ -13,14 +13,15 @@
  */
 package io.trino.metadata;
 
+import io.trino.FeaturesConfig;
 import io.trino.Session;
-import io.trino.operator.aggregation.InternalAggregationFunction;
+import io.trino.operator.aggregation.TestingAggregationFunction;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
-import io.trino.sql.analyzer.FeaturesConfig;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.analyzer.TypeSignatureProvider;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.gen.PageFunctionCompiler;
@@ -38,6 +39,7 @@ import java.util.stream.Collectors;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
 import static io.trino.transaction.InMemoryTransactionManager.createTestTransactionManager;
 import static io.trino.transaction.TransactionBuilder.transaction;
 import static java.util.Objects.requireNonNull;
@@ -46,16 +48,13 @@ public class TestingFunctionResolution
 {
     private final TransactionManager transactionManager;
     private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
     public TestingFunctionResolution()
     {
-        this(new FeaturesConfig());
-    }
-
-    public TestingFunctionResolution(FeaturesConfig featuresConfig)
-    {
-        transactionManager = createTestTransactionManager();
-        metadata = createTestMetadataManager(transactionManager, requireNonNull(featuresConfig, "featuresConfig is null"));
+        this.transactionManager = createTestTransactionManager();
+        this.metadata = createTestMetadataManager(transactionManager, new FeaturesConfig());
+        this.plannerContext = plannerContextBuilder().withMetadata(metadata).build();
     }
 
     public TestingFunctionResolution(LocalQueryRunner localQueryRunner)
@@ -67,12 +66,18 @@ public class TestingFunctionResolution
     {
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = plannerContextBuilder().withMetadata(metadata).build();
     }
 
     public TestingFunctionResolution addFunctions(List<? extends SqlFunction> functions)
     {
         metadata.addFunctions(functions);
         return this;
+    }
+
+    public PlannerContext getPlannerContext()
+    {
+        return plannerContext;
     }
 
     public Metadata getMetadata()
@@ -131,9 +136,15 @@ public class TestingFunctionResolution
         return inTransaction(session -> metadata.getScalarFunctionInvoker(metadata.resolveFunction(session, name, parameterTypes), invocationConvention));
     }
 
-    public InternalAggregationFunction getAggregateFunctionImplementation(QualifiedName name, List<TypeSignatureProvider> parameterTypes)
+    public TestingAggregationFunction getAggregateFunction(QualifiedName name, List<TypeSignatureProvider> parameterTypes)
     {
-        return inTransaction(session -> metadata.getAggregateFunctionImplementation(metadata.resolveFunction(session, name, parameterTypes)));
+        return inTransaction(session -> {
+            ResolvedFunction resolvedFunction = metadata.resolveFunction(session, name, parameterTypes);
+            return new TestingAggregationFunction(
+                    resolvedFunction.getSignature(),
+                    resolvedFunction.getFunctionNullability(),
+                    metadata.getAggregateFunctionImplementation(resolvedFunction));
+        });
     }
 
     private <T> T inTransaction(Function<Session, T> transactionSessionConsumer)

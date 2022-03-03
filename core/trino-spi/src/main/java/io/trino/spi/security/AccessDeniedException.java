@@ -318,6 +318,16 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot delete from table %s%s", tableName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyTruncateTable(String tableName)
+    {
+        denyTruncateTable(tableName, null);
+    }
+
+    public static void denyTruncateTable(String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot truncate table %s%s", tableName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denyUpdateTableColumns(String tableName, Set<String> updatedColumnNames)
     {
         denyUpdateTableColumns(tableName, updatedColumnNames, null);
@@ -418,6 +428,16 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot refresh materialized view %s%s", materializedViewName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denySetMaterializedViewProperties(String materializedViewName)
+    {
+        denySetMaterializedViewProperties(materializedViewName, null);
+    }
+
+    public static void denySetMaterializedViewProperties(String materializedViewName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot set properties of materialized view %s%s", materializedViewName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denyDropMaterializedView(String materializedViewName)
     {
         denyDropMaterializedView(materializedViewName, null);
@@ -448,6 +468,16 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot grant privilege %s on schema %s%s", privilege, schemaName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyDenySchemaPrivilege(String privilege, String schemaName)
+    {
+        denyDenySchemaPrivilege(privilege, schemaName, null);
+    }
+
+    public static void denyDenySchemaPrivilege(String privilege, String schemaName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot deny privilege %s on schema %s%s", privilege, schemaName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denyRevokeSchemaPrivilege(String privilege, String schemaName)
     {
         denyRevokeSchemaPrivilege(privilege, schemaName, null);
@@ -466,6 +496,16 @@ public class AccessDeniedException
     public static void denyGrantTablePrivilege(String privilege, String tableName, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot grant privilege %s on table %s%s", privilege, tableName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyDenyTablePrivilege(String privilege, String tableName)
+    {
+        denyDenyTablePrivilege(privilege, tableName, null);
+    }
+
+    public static void denyDenyTablePrivilege(String privilege, String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot deny privilege %s on table %s%s", privilege, tableName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyRevokeTablePrivilege(String privilege, String tableName)

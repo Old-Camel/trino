@@ -82,7 +82,7 @@ public class TestFunctionRegistry
                 continue;
             }
             List<Type> argumentTypes = function.getSignature().getArgumentTypes().stream()
-                    .map(metadata::getType)
+                    .map(functionResolution.getPlannerContext().getTypeManager()::getType)
                     .collect(toImmutableList());
             BoundSignature exactOperator = functionResolution.resolveOperator(operatorType, argumentTypes).getSignature();
             assertEquals(exactOperator.toSignature(), function.getSignature());
@@ -286,7 +286,7 @@ public class TestFunctionRegistry
     {
         ImmutableSet<String> literalParameters = ImmutableSet.of("p", "s", "p1", "s1", "p2", "s2", "p3", "s3");
         List<TypeSignature> argumentSignatures = arguments.stream()
-                .map((signature) -> parseTypeSignature(signature, literalParameters))
+                .map(signature -> parseTypeSignature(signature, literalParameters))
                 .collect(toImmutableList());
         return new SignatureBuilder()
                 .returnType(parseTypeSignature(returnType, literalParameters))
@@ -348,8 +348,7 @@ public class TestFunctionRegistry
                 Signature signature = functionSignature.name(TEST_FUNCTION_NAME).build();
                 FunctionMetadata functionMetadata = new FunctionMetadata(
                         signature,
-                        false,
-                        nCopies(signature.getArgumentTypes().size(), new FunctionArgumentDefinition(false)),
+                        new FunctionNullability(false, nCopies(signature.getArgumentTypes().size(), false)),
                         false,
                         false,
                         "testing function that does nothing",
@@ -357,12 +356,12 @@ public class TestFunctionRegistry
                 functions.add(new SqlScalarFunction(functionMetadata)
                 {
                     @Override
-                    protected ScalarFunctionImplementation specialize(FunctionBinding functionBinding)
+                    protected ScalarFunctionImplementation specialize(BoundSignature boundSignature)
                     {
                         return new ChoicesScalarFunctionImplementation(
-                                functionBinding,
+                                boundSignature,
                                 FAIL_ON_NULL,
-                                nCopies(functionBinding.getArity(), NEVER_NULL),
+                                nCopies(boundSignature.getArity(), NEVER_NULL),
                                 MethodHandles.identity(Void.class));
                     }
                 });

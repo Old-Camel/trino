@@ -73,6 +73,7 @@ public abstract class BaseSqlServerConnectorTest
                 return false;
 
             case SUPPORTS_ARRAY:
+            case SUPPORTS_NEGATIVE_DATE:
                 return false;
 
             case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
@@ -112,13 +113,14 @@ public abstract class BaseSqlServerConnectorTest
     protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
         String typeName = dataMappingTestSetup.getTrinoTypeName();
+        if (typeName.equals("date")) {
+            // SQL Server plus 10 days when the date is the range of 1582 Oct 5 and 14
+            if (dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-05'") || dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-14'")) {
+                return Optional.empty();
+            }
+        }
         if (typeName.equals("timestamp(3) with time zone")) {
             return Optional.of(dataMappingTestSetup.asUnsupported());
-        }
-
-        if (typeName.equals("varbinary")) {
-            // TODO this should either work or fail cleanly
-            return Optional.empty();
         }
 
         return Optional.of(dataMappingTestSetup);
@@ -135,7 +137,6 @@ public abstract class BaseSqlServerConnectorTest
 
     @Test
     public void testColumnComment()
-            throws Exception
     {
         try (TestTable testTable = new TestTable(onRemoteDatabase(), "test_column_comment", "(col1 bigint, col2 bigint, col3 bigint)")) {
             onRemoteDatabase().execute("" +
@@ -154,7 +155,6 @@ public abstract class BaseSqlServerConnectorTest
 
     @Test
     public void testPredicatePushdown()
-            throws Exception
     {
         // varchar equality
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name = 'ROMANIA'"))
@@ -456,6 +456,35 @@ public abstract class BaseSqlServerConnectorTest
                         ")");
 
         assertUpdate("DROP TABLE test_show_unique_constraint_table");
+    }
+
+    @Test
+    @Override
+    public void testDateYearOfEraPredicate()
+    {
+        // SQL Server throws an exception instead of an empty result when the value is out of range
+        assertQuery("SELECT orderdate FROM orders WHERE orderdate = DATE '1997-09-14'", "VALUES DATE '1997-09-14'");
+        assertQueryFails(
+                "SELECT * FROM orders WHERE orderdate = DATE '-1996-09-14'",
+                "Conversion failed when converting date and/or time from character string\\.");
+    }
+
+    @Override
+    protected String errorMessageForCreateTableAsSelectNegativeDate(String date)
+    {
+        return "Failed to insert data: Conversion failed when converting date and/or time from character string.";
+    }
+
+    @Override
+    protected String errorMessageForInsertNegativeDate(String date)
+    {
+        return "Failed to insert data: Conversion failed when converting date and/or time from character string.";
+    }
+
+    @Override
+    protected String errorMessageForInsertIntoNotNullColumn(String columnName)
+    {
+        return format("Cannot insert the value NULL into column '%s'.*", columnName);
     }
 
     private String getLongInClause(int start, int length)

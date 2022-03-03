@@ -50,6 +50,32 @@ determine the user credentials for the connection, often a service user. You can
 use :doc:`secrets </security/secrets>` to avoid actual values in the catalog
 properties files.
 
+.. _mysql-tls:
+
+Connection security
+^^^^^^^^^^^^^^^^^^^
+
+If you have TLS configured with a globally-trusted certificate installed on your
+data source, you can enable TLS between your cluster and the data
+source by appending a parameter to the JDBC connection string set in the
+``connection-url`` catalog configuration property.
+
+For example, with version 8.0 of MySQL Connector/J, use the ``sslMode``
+parameter to secure the connection with TLS. By default the parameter is set to
+``PREFERRED`` which secures the connection if enabled by the server. You can
+also set this parameter to ``REQUIRED`` which causes the connection to fail if
+TLS is not established.
+
+You can set the ``sslMode`` paremeter in the catalog configuration file by
+appending it to the ``connection-url`` configuration property:
+
+.. code-block:: properties
+
+  connection-url=jdbc:mysql://example.net:3306/?sslMode=REQUIRED
+
+For more information on TLS configuration options, see the `MySQL JDBC security
+documentation <https://dev.mysql.com/doc/connector-j/8.0/en/connector-j-connp-props-security.html#cj-conn-prop_sslMode>`_.
+
 Multiple MySQL servers
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -60,6 +86,8 @@ example, if you name the property file ``sales.properties``, Trino
 creates a catalog named ``sales`` using the configured connector.
 
 .. include:: jdbc-common-configurations.fragment
+
+.. include:: jdbc-procedures.fragment
 
 .. include:: jdbc-case-insensitive-matching.fragment
 
@@ -278,6 +306,8 @@ The connector supports pushdown for a number of operations:
 * :func:`var_pop`
 * :func:`var_samp`
 
+.. include:: no-pushdown-text-type.fragment
+
 .. _mysql-sql-support:
 
 SQL support
@@ -290,6 +320,7 @@ the following statements:
 
 * :doc:`/sql/insert`
 * :doc:`/sql/delete`
+* :doc:`/sql/truncate`
 * :doc:`/sql/create-table`
 * :doc:`/sql/create-table-as`
 * :doc:`/sql/drop-table`

@@ -32,6 +32,7 @@ public final class JdbcClientStats
     private final JdbcApiStats setColumnComment = new JdbcApiStats();
     private final JdbcApiStats dropColumn = new JdbcApiStats();
     private final JdbcApiStats dropSchema = new JdbcApiStats();
+    private final JdbcApiStats renameSchema = new JdbcApiStats();
     private final JdbcApiStats dropTable = new JdbcApiStats();
     private final JdbcApiStats finishInsertTable = new JdbcApiStats();
     private final JdbcApiStats getColumns = new JdbcApiStats();
@@ -54,6 +55,7 @@ public final class JdbcClientStats
     private final JdbcApiStats implementAggregation = new JdbcApiStats();
     private final JdbcApiStats getTableScanRedirection = new JdbcApiStats();
     private final JdbcApiStats delete = new JdbcApiStats();
+    private final JdbcApiStats truncateTable = new JdbcApiStats();
 
     @Managed
     @Nested
@@ -151,6 +153,13 @@ public final class JdbcClientStats
     public JdbcApiStats getDropSchema()
     {
         return dropSchema;
+    }
+
+    @Managed
+    @Nested
+    public JdbcApiStats getRenameSchema()
+    {
+        return renameSchema;
     }
 
     @Managed
@@ -305,5 +314,12 @@ public final class JdbcClientStats
     public JdbcApiStats getDelete()
     {
         return delete;
+    }
+
+    @Managed
+    @Nested
+    public JdbcApiStats getTruncateTable()
+    {
+        return truncateTable;
     }
 }

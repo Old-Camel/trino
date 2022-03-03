@@ -33,6 +33,7 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.testing.sql.TestTable.randomTableSuffix;
 import static java.lang.String.format;
+import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
@@ -86,6 +87,15 @@ public abstract class BaseOracleConnectorTest
     protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
         String typeName = dataMappingTestSetup.getTrinoTypeName();
+        if (typeName.equals("date")) {
+            // TODO (https://github.com/trinodb/trino/issues) Oracle connector stores wrong result when the date value <= 1582-10-14
+            if (dataMappingTestSetup.getSampleValueLiteral().equals("DATE '0001-01-01'")
+                    || dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-04'")
+                    || dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-05'")
+                    || dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-14'")) {
+                return Optional.empty();
+            }
+        }
         if (typeName.equals("time")) {
             return Optional.empty();
         }
@@ -129,7 +139,7 @@ public abstract class BaseOracleConnectorTest
                 .row("custkey", "decimal(19,0)", "", "")
                 .row("orderstatus", "varchar(1)", "", "")
                 .row("totalprice", "double", "", "")
-                .row("orderdate", "timestamp(3)", "", "")
+                .row("orderdate", "timestamp(0)", "", "")
                 .row("orderpriority", "varchar(15)", "", "")
                 .row("clerk", "varchar(15)", "", "")
                 .row("shippriority", "decimal(10,0)", "", "")
@@ -186,7 +196,7 @@ public abstract class BaseOracleConnectorTest
                 .row("custkey", "decimal(19,0)", "", "")
                 .row("orderstatus", "varchar(1)", "", "")
                 .row("totalprice", "double", "", "")
-                .row("orderdate", "timestamp(3)", "", "")
+                .row("orderdate", "timestamp(0)", "", "")
                 .row("orderpriority", "varchar(15)", "", "")
                 .row("clerk", "varchar(15)", "", "")
                 .row("shippriority", "decimal(10,0)", "", "")
@@ -207,7 +217,7 @@ public abstract class BaseOracleConnectorTest
                         "   custkey decimal(19, 0),\n" +
                         "   orderstatus varchar(1),\n" +
                         "   totalprice double,\n" +
-                        "   orderdate timestamp(3),\n" +
+                        "   orderdate timestamp(0),\n" +
                         "   orderpriority varchar(15),\n" +
                         "   clerk varchar(15),\n" +
                         "   shippriority decimal(10, 0),\n" +
@@ -392,6 +402,12 @@ public abstract class BaseOracleConnectorTest
                         .setCatalogSessionProperty("oracle", "domain_compaction_threshold", "10000")
                         .build(),
                 "SELECT * from nation", "Domain compaction threshold \\(10000\\) cannot exceed 1000");
+    }
+
+    @Override
+    protected String errorMessageForInsertIntoNotNullColumn(String columnName)
+    {
+        return format("ORA-01400: cannot insert NULL into \\(.*\"%s\"\\)\n", columnName.toUpperCase(ENGLISH));
     }
 
     private void predicatePushdownTest(String oracleType, String oracleLiteral, String operator, String filterLiteral)

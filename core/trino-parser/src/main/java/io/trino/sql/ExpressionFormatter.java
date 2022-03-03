@@ -148,7 +148,7 @@ public final class ExpressionFormatter
         protected String visitRow(Row node, Void context)
         {
             return "ROW (" + Joiner.on(", ").join(node.getItems().stream()
-                    .map((child) -> process(child, context))
+                    .map(child -> process(child, context))
                     .collect(toList())) + ")";
         }
 
@@ -369,7 +369,7 @@ public final class ExpressionFormatter
         protected String visitDereferenceExpression(DereferenceExpression node, Void context)
         {
             String baseString = process(node.getBase(), context);
-            return baseString + "." + process(node.getField());
+            return baseString + "." + node.getField().map(this::process).orElse("*");
         }
 
         @Override
@@ -613,7 +613,7 @@ public final class ExpressionFormatter
             }
 
             node.getDefaultValue()
-                    .ifPresent((value) -> parts.add("ELSE").add(process(value, context)));
+                    .ifPresent(value -> parts.add("ELSE").add(process(value, context)));
 
             parts.add("END");
 
@@ -633,7 +633,7 @@ public final class ExpressionFormatter
             }
 
             node.getDefaultValue()
-                    .ifPresent((value) -> parts.add("ELSE").add(process(value, context)));
+                    .ifPresent(value -> parts.add("ELSE").add(process(value, context)));
 
             parts.add("END");
 
@@ -783,7 +783,7 @@ public final class ExpressionFormatter
             // LabelDereference, like SymbolReference, is an IR-type expression. It is never a result of the parser.
             // After being formatted this way for serialization, it will be parsed as functionCall
             // and swapped back for LabelDereference.
-            return "LABEL_DEREFERENCE(" + formatIdentifier(node.getLabel()) + ", " + process(node.getReference()) + ")";
+            return "LABEL_DEREFERENCE(" + formatIdentifier(node.getLabel()) + ", " + node.getReference().map(this::process).orElse("*") + ")";
         }
 
         private String formatBinaryExpression(String operator, Expression left, Expression right)
@@ -800,7 +800,7 @@ public final class ExpressionFormatter
 
         /**
          * Returns the formatted `LISTAGG` function call corresponding to the specified node.
-         *
+         * <p>
          * During the parsing of the syntax tree, the `LISTAGG` expression is synthetically converted
          * to a function call. This method formats the specified {@link FunctionCall} node to correspond
          * to the standardised syntax of the `LISTAGG` expression.

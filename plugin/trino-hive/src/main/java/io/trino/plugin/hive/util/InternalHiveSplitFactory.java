@@ -163,6 +163,11 @@ public class InternalHiveSplitFactory
             return Optional.empty();
         }
 
+        // per HIVE-13040 empty files are allowed
+        if (estimatedFileSize == 0) {
+            return Optional.empty();
+        }
+
         // Dynamic filter may not have been ready when partition was loaded in BackgroundHiveSplitLoader,
         // but it might be ready when splits are enumerated lazily.
         if (!partitionMatchSupplier.getAsBoolean()) {
@@ -171,17 +176,6 @@ public class InternalHiveSplitFactory
 
         if (maxSplitFileSize.isPresent() && estimatedFileSize > maxSplitFileSize.get()) {
             return Optional.empty();
-        }
-
-        boolean forceLocalScheduling = this.forceLocalScheduling;
-
-        // For empty files, some filesystem (e.g. LocalFileSystem) produce one empty block
-        // while others (e.g. hdfs.DistributedFileSystem) produces no block.
-        // Synthesize an empty block if one does not already exist.
-        if (estimatedFileSize == 0 && blockLocations.length == 0) {
-            blockLocations = new BlockLocation[] {new BlockLocation()};
-            // Turn off force local scheduling because hosts list doesn't exist.
-            forceLocalScheduling = false;
         }
 
         ImmutableList.Builder<InternalHiveBlock> blockBuilder = ImmutableList.builder();
@@ -226,7 +220,8 @@ public class InternalHiveSplitFactory
                 bucketConversion,
                 bucketValidation,
                 s3SelectPushdownEnabled && S3SelectPushdown.isCompressionCodecSupported(inputFormat, path),
-                acidInfo));
+                acidInfo,
+                partitionMatchSupplier));
     }
 
     private static void checkBlocks(Path path, List<InternalHiveBlock> blocks, long start, long length)

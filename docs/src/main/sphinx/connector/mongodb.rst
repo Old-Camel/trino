@@ -24,7 +24,7 @@ replacing the properties as appropriate:
 .. code-block:: text
 
     connector.name=mongodb
-    mongodb.seeds=host1,host:port
+    mongodb.connection-url=mongodb://user:pass@sample.host:27017/
 
 Multiple MongoDB clusters
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -44,6 +44,7 @@ The following configuration properties are available:
 Property Name                              Description
 ========================================== ==============================================================
 ``mongodb.seeds``                          List of all MongoDB servers
+``mongodb.connection-url``                 The connection url that the driver uses to connect to a MongoDB deployment
 ``mongodb.schema-collection``              A collection which contains schema information
 ``mongodb.case-insensitive-name-matching`` Match database and collection names case insensitively
 ``mongodb.credentials``                    List of credentials
@@ -53,7 +54,6 @@ Property Name                              Description
 ``mongodb.max-connection-idle-time``       The maximum idle time of a pooled connection
 ``mongodb.connection-timeout``             The socket connect timeout
 ``mongodb.socket-timeout``                 The socket timeout
-``mongodb.socket-keep-alive``              Whether keep-alive is enabled on each socket
 ``mongodb.ssl.enabled``                    Use TLS/SSL for connections to mongod/mongos
 ``mongodb.read-preference``                The read preference
 ``mongodb.write-concern``                  The write concern
@@ -66,14 +66,45 @@ Property Name                              Description
 
 Comma-separated list of ``hostname[:port]`` all MongoDB servers in the same replica set, or a list of MongoDB servers in the same sharded cluster. If a port is not specified, port 27017 will be used.
 
-This property is required; there is no default and at least one seed must be defined.
+This property is deprecated and will be removed in a future release. Use ``mongodb.connection-url`` property instead.
+
+``mongodb.connection-url``
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A string containing the protocol, credential and host info for use in connection to your MongoDB deployment.
+
+This could be ``mongodb://<user>:<pass>@<host>:<port>/?<options>`` or ``mongodb+srv://<user>:<pass>@<host>/?<options>``.
+
+See the `MongoDB Connection URI <https://docs.mongodb.com/drivers/java/sync/current/fundamentals/connection/#connection-uri>`_ for more information.
+
+This property is required; there is no default. A connection url or seeds must be provided to connect to a MongoDB deployment.
 
 ``mongodb.schema-collection``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 As MongoDB is a document database, there is no fixed schema information in the system. So a special collection in each MongoDB database should define the schema of all tables. Please refer the :ref:`table-definition-label` section for the details.
 
-At startup, this connector tries guessing fields' types, but it might not be correct for your collection. In that case, you need to modify it manually. ``CREATE TABLE`` and ``CREATE TABLE AS SELECT`` will create an entry for you.
+At startup, the connector tries to guess the data type of fields based on the mapping in the following table.
+
+================== ================ ================================================
+MongoDB            Trino            Notes
+================== ================ ================================================
+``Boolean``        ``BOOLEAN``
+``Int32``          ``BIGINT``
+``Int64``          ``BIGINT``
+``Double``         ``DOUBLE``
+``Date``           ``TIMESTAMP(3)``
+``String``         ``VARCHAR``
+``Binary``         ``VARBINARY``
+``ObjectId``       ``ObjectId``
+``Object``         ``ROW``
+``Array``          ``ARRAY``        Map to ``ROW`` if the element type is not unique
+``DBRef``          ``ROW``
+================== ================ ================================================
+
+The initial guess can be incorrect for your specific collection. In that case, you need to modify it manually. Please refer the :ref:`table-definition-label` section for the details.
+
+Creating new tables using ``CREATE TABLE`` and ``CREATE TABLE AS SELECT`` automatically create an entry for you.
 
 This property is optional; the default is ``_schema``.
 
@@ -135,13 +166,6 @@ The socket timeout in milliseconds. It is used for I/O socket read and write ope
 
 This property is optional; the default is ``0`` and means no timeout.
 
-``mongodb.socket-keep-alive``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This flag controls the socket keep alive feature that keeps a connection alive through firewalls.
-
-This property is optional; the default is ``true``.
-
 ``mongodb.ssl.enabled``
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -161,8 +185,7 @@ This property is optional; the default is ``PRIMARY``.
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The write concern to use. The available values are
-``ACKNOWLEDGED``, ``FSYNC_SAFE``, ``FSYNCED``, ``JOURNAL_SAFEY``, ``JOURNALED``, ``MAJORITY``,
-``NORMAL``, ``REPLICA_ACKNOWLEDGED``, ``REPLICAS_SAFE`` and ``UNACKNOWLEDGED``.
+``ACKNOWLEDGED``, ``JOURNALED``, ``MAJORITY`` and ``UNACKNOWLEDGED``.
 
 This property is optional; the default is ``ACKNOWLEDGED``.
 

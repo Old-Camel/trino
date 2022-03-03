@@ -20,11 +20,14 @@ import com.datastax.driver.core.ProtocolVersion;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.TupleType;
 import com.datastax.driver.core.TupleValue;
+import com.datastax.driver.core.UDTValue;
+import com.datastax.driver.core.UserType;
 import com.datastax.driver.core.utils.Bytes;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.net.InetAddresses;
 import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
@@ -71,6 +74,7 @@ import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
+import static io.trino.spi.type.UuidType.trinoUuidToJavaUuid;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Float.intBitsToFloat;
 import static java.lang.Math.toIntExact;
@@ -104,6 +108,7 @@ public class CassandraType
         SET,
         MAP,
         TUPLE,
+        UDT,
     }
 
     private final Kind kind;
@@ -196,6 +201,8 @@ public class CassandraType
                 return Optional.of(CassandraTypes.TINYINT);
             case TUPLE:
                 return createTypeForTuple(dataType);
+            case UDT:
+                return createTypeForUserType(dataType);
             case UUID:
                 return Optional.of(CassandraTypes.UUID);
             case VARCHAR:
@@ -228,6 +235,28 @@ public class CassandraType
                         .collect(toImmutableList()));
 
         return Optional.of(new CassandraType(Kind.TUPLE, trinoType, argumentTypes));
+    }
+
+    private static Optional<CassandraType> createTypeForUserType(DataType dataType)
+    {
+        UserType userType = (UserType) dataType;
+        // Using ImmutableMap is important as we exploit the fact that entries iteration order matches the order of putting values via builder
+        ImmutableMap.Builder<String, CassandraType> argumentTypes = ImmutableMap.builder();
+        for (UserType.Field field : userType) {
+            Optional<CassandraType> cassandraType = CassandraType.toCassandraType(field.getType());
+            if (cassandraType.isEmpty()) {
+                return Optional.empty();
+            }
+
+            argumentTypes.put(field.getName(), cassandraType.get());
+        }
+
+        RowType trinoType = RowType.from(
+                argumentTypes.buildOrThrow().entrySet().stream()
+                        .map(field -> new RowType.Field(Optional.of(field.getKey()), field.getValue().getTrinoType()))
+                        .collect(toImmutableList()));
+
+        return Optional.of(new CassandraType(Kind.UDT, trinoType, argumentTypes.buildOrThrow().values().stream().collect(toImmutableList())));
     }
 
     public NullableValue getColumnValue(Row row, int position)
@@ -284,6 +313,8 @@ public class CassandraType
                 return NullableValue.of(trinoType, utf8Slice(buildMapValue(row, position, dataTypeSupplier.get())));
             case TUPLE:
                 return NullableValue.of(trinoType, buildTupleValue(row, position));
+            case UDT:
+                return NullableValue.of(trinoType, buildUserTypeValue(row, position));
         }
         throw new IllegalStateException("Handling of type " + this + " is not implemented");
     }
@@ -351,6 +382,25 @@ public class CassandraType
         return (Block) this.trinoType.getObject(blockBuilder, 0);
     }
 
+    private Block buildUserTypeValue(GettableByIndexData row, int position)
+    {
+        verify(this.kind == Kind.UDT, "Not a user defined type: %s", this.kind);
+        UDTValue udtValue = row.getUDTValue(position);
+        String[] fieldNames = udtValue.getType().getFieldNames().toArray(String[]::new);
+        RowBlockBuilder blockBuilder = (RowBlockBuilder) this.trinoType.createBlockBuilder(null, 1);
+        SingleRowBlockWriter singleRowBlockWriter = blockBuilder.beginBlockEntry();
+        int tuplePosition = 0;
+        for (CassandraType argumentType : this.getArgumentTypes()) {
+            int finalTuplePosition = tuplePosition;
+            NullableValue value = argumentType.getColumnValue(udtValue, tuplePosition, () -> udtValue.getType().getFieldType(fieldNames[finalTuplePosition]));
+            writeNativeValue(argumentType.getTrinoType(), singleRowBlockWriter, value.getValue());
+            tuplePosition++;
+        }
+
+        blockBuilder.closeEntry();
+        return (Block) this.trinoType.getObject(blockBuilder, 0);
+    }
+
     // TODO unify with toCqlLiteral
     public String getColumnValueForCql(Row row, int position)
     {
@@ -399,6 +449,7 @@ public class CassandraType
             case SET:
             case MAP:
             case TUPLE:
+            case UDT:
                 // unsupported
                 break;
         }
@@ -453,6 +504,7 @@ public class CassandraType
             case INET:
             case VARINT:
             case TUPLE:
+            case UDT:
                 return quoteStringLiteralForJson(cassandraValue.toString());
 
             case BLOB:
@@ -510,10 +562,11 @@ public class CassandraType
                 return LocalDate.fromDaysSinceEpoch(((Long) trinoNativeValue).intValue());
             case UUID:
             case TIMEUUID:
-                return java.util.UUID.fromString(((Slice) trinoNativeValue).toStringUtf8());
+                return trinoUuidToJavaUuid((Slice) trinoNativeValue);
             case BLOB:
             case CUSTOM:
             case TUPLE:
+            case UDT:
                 return ((Slice) trinoNativeValue).toStringUtf8();
             case VARINT:
                 return new BigInteger(((Slice) trinoNativeValue).toStringUtf8());
@@ -552,6 +605,7 @@ public class CassandraType
             case LIST:
             case MAP:
             case TUPLE:
+            case UDT:
             default:
                 return false;
         }

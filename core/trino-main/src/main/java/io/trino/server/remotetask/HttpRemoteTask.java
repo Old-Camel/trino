@@ -13,7 +13,6 @@
  */
 package io.trino.server.remotetask;
 
-import com.google.common.base.Ticker;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Multimap;
@@ -40,10 +39,10 @@ import io.trino.execution.NodeTaskMap.PartitionedSplitCountTracker;
 import io.trino.execution.PartitionedSplitsInfo;
 import io.trino.execution.RemoteTask;
 import io.trino.execution.ScheduledSplit;
+import io.trino.execution.SplitAssignment;
 import io.trino.execution.StateMachine.StateChangeListener;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskInfo;
-import io.trino.execution.TaskSource;
 import io.trino.execution.TaskState;
 import io.trino.execution.TaskStatus;
 import io.trino.execution.buffer.BufferInfo;
@@ -54,6 +53,7 @@ import io.trino.operator.TaskStats;
 import io.trino.server.DynamicFilterService;
 import io.trino.server.TaskUpdateRequest;
 import io.trino.spi.SplitWeight;
+import io.trino.spi.TrinoTransportException;
 import io.trino.sql.planner.PlanFragment;
 import io.trino.sql.planner.plan.DynamicFilterId;
 import io.trino.sql.planner.plan.PlanNode;
@@ -76,7 +76,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -102,9 +101,7 @@ import static io.trino.server.remotetask.RequestErrorTracker.logError;
 import static io.trino.util.Failures.toFailure;
 import static java.lang.Math.addExact;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static java.util.concurrent.TimeUnit.SECONDS;
 
 public final class HttpRemoteTask
         implements RemoteTask
@@ -160,6 +157,7 @@ public final class HttpRemoteTask
     private final HttpClient httpClient;
     private final Executor executor;
     private final ScheduledExecutorService errorScheduledExecutor;
+    private final Duration maxErrorDuration;
 
     private final JsonCodec<TaskInfo> taskInfoCodec;
     private final JsonCodec<TaskUpdateRequest> taskUpdateRequestCodec;
@@ -223,6 +221,7 @@ public final class HttpRemoteTask
             this.httpClient = httpClient;
             this.executor = executor;
             this.errorScheduledExecutor = errorScheduledExecutor;
+            this.maxErrorDuration = requireNonNull(maxErrorDuration, "maxErrorDuration is null");
             this.summarizeTaskInfo = summarizeTaskInfo;
             this.taskInfoCodec = taskInfoCodec;
             this.taskUpdateRequestCodec = taskUpdateRequestCodec;
@@ -256,7 +255,7 @@ public final class HttpRemoteTask
             TaskInfo initialTask = createInitialTask(taskId, location, nodeId, bufferStates, new TaskStats(DateTime.now(), null));
 
             this.dynamicFiltersFetcher = new DynamicFiltersFetcher(
-                    this::failTask,
+                    this::fail,
                     taskId,
                     location,
                     taskStatusRefreshMaxWait,
@@ -269,7 +268,7 @@ public final class HttpRemoteTask
                     dynamicFilterService);
 
             this.taskStatusFetcher = new ContinuousTaskStatusFetcher(
-                    this::failTask,
+                    this::fail,
                     initialTask.getTaskStatus(),
                     taskStatusRefreshMaxWait,
                     taskStatusCodec,
@@ -281,7 +280,8 @@ public final class HttpRemoteTask
                     stats);
 
             this.taskInfoFetcher = new TaskInfoFetcher(
-                    this::failTask,
+                    this::fail,
+                    taskStatusFetcher,
                     initialTask,
                     httpClient,
                     taskInfoUpdateInterval,
@@ -307,6 +307,7 @@ public final class HttpRemoteTask
             this.outboundDynamicFiltersCollector = new DynamicFiltersCollector(this::triggerUpdate);
             dynamicFilterService.registerDynamicFilterConsumer(
                     taskId.getQueryId(),
+                    taskId.getAttemptId(),
                     outboundDynamicFilterIds,
                     outboundDynamicFiltersCollector::updateDomains);
 
@@ -528,17 +529,17 @@ public final class HttpRemoteTask
         }
     }
 
-    private synchronized void processTaskUpdate(TaskInfo newValue, List<TaskSource> sources)
+    private synchronized void processTaskUpdate(TaskInfo newValue, List<SplitAssignment> splitAssignments)
     {
         updateTaskInfo(newValue);
 
         // remove acknowledged splits, which frees memory
-        for (TaskSource source : sources) {
-            PlanNodeId planNodeId = source.getPlanNodeId();
+        for (SplitAssignment assignment : splitAssignments) {
+            PlanNodeId planNodeId = assignment.getPlanNodeId();
             boolean isPartitionedSource = planFragment.isPartitionedSources(planNodeId);
             int removed = 0;
             long removedWeight = 0;
-            for (ScheduledSplit split : source.getSplits()) {
+            for (ScheduledSplit split : assignment.getSplits()) {
                 if (pendingSplits.remove(planNodeId, split)) {
                     if (isPartitionedSource) {
                         removed++;
@@ -546,10 +547,10 @@ public final class HttpRemoteTask
                     }
                 }
             }
-            if (source.isNoMoreSplits()) {
+            if (assignment.isNoMoreSplits()) {
                 noMoreSplits.put(planNodeId, false);
             }
-            for (Lifespan lifespan : source.getNoMoreSplitsForLifespan()) {
+            for (Lifespan lifespan : assignment.getNoMoreSplitsForLifespan()) {
                 pendingNoMoreSplitsForLifespan.remove(planNodeId, lifespan);
             }
             if (isPartitionedSource) {
@@ -577,7 +578,7 @@ public final class HttpRemoteTask
     {
         // synchronized so that needsUpdate is not cleared in sendUpdate before actual request is sent
         needsUpdate.set(true);
-        sendUpdate();
+        scheduleUpdate();
     }
 
     private synchronized void sendUpdate()
@@ -601,7 +602,7 @@ public final class HttpRemoteTask
             return;
         }
 
-        List<TaskSource> sources = getSources();
+        List<SplitAssignment> splitAssignments = getSplitAssignments();
         VersionedDynamicFilterDomains dynamicFilterDomains = outboundDynamicFiltersCollector.acknowledgeAndGetNewDomains(sentDynamicFiltersVersion);
 
         // Workers don't need the embedded JSON representation when the fragment is sent
@@ -610,7 +611,7 @@ public final class HttpRemoteTask
                 session.toSessionRepresentation(),
                 session.getIdentity().getExtraCredentials(),
                 fragment,
-                sources,
+                splitAssignments,
                 outputBuffers.get(),
                 dynamicFilterDomains.getDynamicFilterDomains());
         byte[] taskUpdateRequestJson = taskUpdateRequestCodec.toJsonBytes(updateRequest);
@@ -640,32 +641,32 @@ public final class HttpRemoteTask
 
         Futures.addCallback(
                 future,
-                new SimpleHttpResponseHandler<>(new UpdateResponseHandler(sources, dynamicFilterDomains.getVersion()), request.getUri(), stats),
+                new SimpleHttpResponseHandler<>(new UpdateResponseHandler(splitAssignments, dynamicFilterDomains.getVersion()), request.getUri(), stats),
                 executor);
     }
 
-    private synchronized List<TaskSource> getSources()
+    private synchronized List<SplitAssignment> getSplitAssignments()
     {
         return Stream.concat(planFragment.getPartitionedSourceNodes().stream(), planFragment.getRemoteSourceNodes().stream())
                 .filter(Objects::nonNull)
                 .map(PlanNode::getId)
-                .map(this::getSource)
+                .map(this::getSplitAssignment)
                 .filter(Objects::nonNull)
                 .collect(toImmutableList());
     }
 
-    private synchronized TaskSource getSource(PlanNodeId planNodeId)
+    private synchronized SplitAssignment getSplitAssignment(PlanNodeId planNodeId)
     {
         Set<ScheduledSplit> splits = pendingSplits.get(planNodeId);
         boolean pendingNoMoreSplits = Boolean.TRUE.equals(this.noMoreSplits.get(planNodeId));
         boolean noMoreSplits = this.noMoreSplits.containsKey(planNodeId);
         Set<Lifespan> noMoreSplitsForLifespan = pendingNoMoreSplitsForLifespan.get(planNodeId);
 
-        TaskSource element = null;
+        SplitAssignment assignment = null;
         if (!splits.isEmpty() || !noMoreSplitsForLifespan.isEmpty() || pendingNoMoreSplits) {
-            element = new TaskSource(planNodeId, splits, noMoreSplitsForLifespan, noMoreSplits);
+            assignment = new SplitAssignment(planNodeId, splits, noMoreSplitsForLifespan, noMoreSplits);
         }
-        return element;
+        return assignment;
     }
 
     @Override
@@ -678,11 +679,7 @@ public final class HttpRemoteTask
             }
 
             // send cancel to task and ignore response
-            HttpUriBuilder uriBuilder = getHttpUriBuilder(taskStatus).addParameter("abort", "false");
-            Request request = prepareDelete()
-                    .setUri(uriBuilder.build())
-                    .build();
-            scheduleAsyncCleanupRequest(createCleanupBackoff(), request, "cancel");
+            scheduleAsyncCleanupRequest(new Backoff(maxErrorDuration), "cancel", false);
         }
     }
 
@@ -713,12 +710,7 @@ public final class HttpRemoteTask
 
         // The remote task is likely to get a delete from the PageBufferClient first.
         // We send an additional delete anyway to get the final TaskInfo
-        HttpUriBuilder uriBuilder = getHttpUriBuilder(getTaskStatus());
-        Request request = prepareDelete()
-                .setUri(uriBuilder.build())
-                .build();
-
-        scheduleAsyncCleanupRequest(createCleanupBackoff(), request, "cleanup");
+        scheduleAsyncCleanupRequest(new Backoff(maxErrorDuration), "cleanup", true);
     }
 
     @Override
@@ -728,32 +720,26 @@ public final class HttpRemoteTask
             return;
         }
 
-        abort(failWith(getTaskStatus(), ABORTED, ImmutableList.of()));
-    }
-
-    private synchronized void abort(TaskStatus status)
-    {
-        checkState(status.getState().isDone(), "cannot abort task with an incomplete status");
-
+        TaskStatus status = failWith(getTaskStatus(), ABORTED, ImmutableList.of());
         try (SetThreadName ignored = new SetThreadName("HttpRemoteTask-%s", taskId)) {
             taskStatusFetcher.updateTaskStatus(status);
-
             // send abort to task
-            HttpUriBuilder uriBuilder = getHttpUriBuilder(getTaskStatus());
-            Request request = prepareDelete()
-                    .setUri(uriBuilder.build())
-                    .build();
-            scheduleAsyncCleanupRequest(createCleanupBackoff(), request, "abort");
+            scheduleAsyncCleanupRequest(new Backoff(maxErrorDuration), "abort", true);
         }
     }
 
-    private void scheduleAsyncCleanupRequest(Backoff cleanupBackoff, Request request, String action)
+    private void scheduleAsyncCleanupRequest(Backoff cleanupBackoff, String action, boolean abort)
     {
         if (!aborting.compareAndSet(false, true)) {
             // Do not initiate another round of cleanup requests if one had been initiated.
             // Otherwise, we can get into an asynchronous recursion here. For example, when aborting a task after REMOTE_TASK_MISMATCH.
             return;
         }
+
+        HttpUriBuilder uriBuilder = getHttpUriBuilder(getTaskStatus()).addParameter("abort", "" + abort);
+        Request request = prepareDelete()
+                .setUri(uriBuilder.build())
+                .build();
         doScheduleAsyncCleanupRequest(cleanupBackoff, request, action);
     }
 
@@ -790,6 +776,11 @@ public final class HttpRemoteTask
                     return;
                 }
 
+                // final task info is set
+                if (taskInfoFetcher.getTaskInfo().getTaskStatus().getState().isDone()) {
+                    return;
+                }
+
                 // reschedule
                 long delayNanos = cleanupBackoff.getBackoffDelayNanos();
                 if (delayNanos == 0) {
@@ -799,41 +790,54 @@ public final class HttpRemoteTask
                     errorScheduledExecutor.schedule(() -> doScheduleAsyncCleanupRequest(cleanupBackoff, request, action), delayNanos, NANOSECONDS);
                 }
             }
-
-            private void cleanUpLocally()
-            {
-                // Update the taskInfo with the new taskStatus.
-
-                // Generally, we send a cleanup request to the worker, and update the TaskInfo on
-                // the coordinator based on what we fetched from the worker. If we somehow cannot
-                // get the cleanup request to the worker, the TaskInfo that we fetch for the worker
-                // likely will not say the task is done however many times we try. In this case,
-                // we have to set the local query info directly so that we stop trying to fetch
-                // updated TaskInfo from the worker. This way, the task on the worker eventually
-                // expires due to lack of activity.
-
-                // This is required because the query state machine depends on TaskInfo (instead of task status)
-                // to transition its own state.
-                // TODO: Update the query state machine and stage state machine to depend on TaskStatus instead
-
-                // Since this TaskInfo is updated in the client the "complete" flag will not be set,
-                // indicating that the stats may not reflect the final stats on the worker.
-                updateTaskInfo(getTaskInfo().withTaskStatus(getTaskStatus()));
-            }
         }, executor);
     }
 
     /**
      * Move the task directly to the failed state if there was a failure in this task
      */
-    private void failTask(Throwable cause)
+    @Override
+    public synchronized void fail(Throwable cause)
     {
         TaskStatus taskStatus = getTaskStatus();
         if (!taskStatus.getState().isDone()) {
             log.debug(cause, "Remote task %s failed with %s", taskStatus.getSelf(), cause);
         }
 
-        abort(failWith(getTaskStatus(), FAILED, ImmutableList.of(toFailure(cause))));
+        TaskStatus status = failWith(getTaskStatus(), FAILED, ImmutableList.of(toFailure(cause)));
+        taskStatusFetcher.updateTaskStatus(status);
+
+        try (SetThreadName ignored = new SetThreadName("HttpRemoteTask-%s", taskId)) {
+            if (cause instanceof TrinoTransportException) {
+                // task is unreachable
+                cleanUpLocally();
+            }
+            else {
+                // send abort to task
+                scheduleAsyncCleanupRequest(new Backoff(maxErrorDuration), "abort", true);
+            }
+        }
+    }
+
+    private void cleanUpLocally()
+    {
+        // Update the taskInfo with the new taskStatus.
+
+        // Generally, we send a cleanup request to the worker, and update the TaskInfo on
+        // the coordinator based on what we fetched from the worker. If we somehow cannot
+        // get the cleanup request to the worker, the TaskInfo that we fetch for the worker
+        // likely will not say the task is done however many times we try. In this case,
+        // we have to set the local query info directly so that we stop trying to fetch
+        // updated TaskInfo from the worker. This way, the task on the worker eventually
+        // expires due to lack of activity.
+
+        // This is required because the query state machine depends on TaskInfo (instead of task status)
+        // to transition its own state.
+        // TODO: Update the query state machine and stage state machine to depend on TaskStatus instead
+
+        // Since this TaskInfo is updated in the client the "complete" flag will not be set,
+        // indicating that the stats may not reflect the final stats on the worker.
+        updateTaskInfo(getTaskInfo().withTaskStatus(getTaskStatus()));
     }
 
     private HttpUriBuilder getHttpUriBuilder(TaskStatus taskStatus)
@@ -843,17 +847,6 @@ public final class HttpRemoteTask
             uriBuilder.addParameter("summarize");
         }
         return uriBuilder;
-    }
-
-    private static Backoff createCleanupBackoff()
-    {
-        return new Backoff(10, new Duration(10, TimeUnit.MINUTES), Ticker.systemTicker(), ImmutableList.<Duration>builder()
-                .add(new Duration(0, MILLISECONDS))
-                .add(new Duration(100, MILLISECONDS))
-                .add(new Duration(500, MILLISECONDS))
-                .add(new Duration(1, SECONDS))
-                .add(new Duration(10, SECONDS))
-                .build());
     }
 
     @Override
@@ -867,12 +860,12 @@ public final class HttpRemoteTask
     private class UpdateResponseHandler
             implements SimpleHttpResponseCallback<TaskInfo>
     {
-        private final List<TaskSource> sources;
+        private final List<SplitAssignment> splitAssignments;
         private final long currentRequestDynamicFiltersVersion;
 
-        private UpdateResponseHandler(List<TaskSource> sources, long currentRequestDynamicFiltersVersion)
+        private UpdateResponseHandler(List<SplitAssignment> splitAssignments, long currentRequestDynamicFiltersVersion)
         {
-            this.sources = ImmutableList.copyOf(requireNonNull(sources, "sources is null"));
+            this.splitAssignments = ImmutableList.copyOf(requireNonNull(splitAssignments, "splitAssignments is null"));
             this.currentRequestDynamicFiltersVersion = currentRequestDynamicFiltersVersion;
         }
 
@@ -891,7 +884,7 @@ public final class HttpRemoteTask
                     // Remove dynamic filters which were successfully sent to free up memory
                     outboundDynamicFiltersCollector.acknowledge(currentRequestDynamicFiltersVersion);
                     updateStats(currentRequestStartNanos);
-                    processTaskUpdate(value, sources);
+                    processTaskUpdate(value, splitAssignments);
                     updateErrorTracker.requestSucceeded();
                 }
                 finally {
@@ -922,11 +915,11 @@ public final class HttpRemoteTask
                     }
                 }
                 catch (Error e) {
-                    failTask(e);
+                    fail(e);
                     throw e;
                 }
                 catch (RuntimeException e) {
-                    failTask(e);
+                    fail(e);
                 }
                 finally {
                     sendUpdate();
@@ -938,7 +931,7 @@ public final class HttpRemoteTask
         public void fatal(Throwable cause)
         {
             try (SetThreadName ignored = new SetThreadName("UpdateResponseHandler-%s", taskId)) {
-                failTask(cause);
+                fail(cause);
             }
         }
 

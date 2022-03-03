@@ -49,10 +49,10 @@ import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class TaskInfoFetcher
-        implements SimpleHttpResponseCallback<TaskInfo>
 {
     private final TaskId taskId;
     private final Consumer<Throwable> onFail;
+    private final ContinuousTaskStatusFetcher taskStatusFetcher;
     private final StateMachine<TaskInfo> taskInfo;
     private final StateMachine<Optional<TaskInfo>> finalTaskInfo;
     private final JsonCodec<TaskInfo> taskInfoCodec;
@@ -66,10 +66,6 @@ public class TaskInfoFetcher
     private final RequestErrorTracker errorTracker;
 
     private final boolean summarizeTaskInfo;
-
-    @GuardedBy("this")
-    private final AtomicLong currentRequestStartNanos = new AtomicLong();
-
     private final RemoteTaskStats stats;
 
     @GuardedBy("this")
@@ -83,6 +79,7 @@ public class TaskInfoFetcher
 
     public TaskInfoFetcher(
             Consumer<Throwable> onFail,
+            ContinuousTaskStatusFetcher taskStatusFetcher,
             TaskInfo initialTask,
             HttpClient httpClient,
             Duration updateInterval,
@@ -99,6 +96,7 @@ public class TaskInfoFetcher
 
         this.taskId = initialTask.getTaskStatus().getTaskId();
         this.onFail = requireNonNull(onFail, "onFail is null");
+        this.taskStatusFetcher = requireNonNull(taskStatusFetcher, "taskStatusFetcher is null");
         this.taskInfo = new StateMachine<>("task " + taskId, executor, initialTask);
         this.finalTaskInfo = new StateMachine<>("task-" + taskId, executor, Optional.empty());
         this.taskInfoCodec = requireNonNull(taskInfoCodec, "taskInfoCodec is null");
@@ -209,12 +207,23 @@ public class TaskInfoFetcher
 
         errorTracker.startRequest();
         future = httpClient.executeAsync(request, createFullJsonResponseHandler(taskInfoCodec));
-        currentRequestStartNanos.set(System.nanoTime());
-        Futures.addCallback(future, new SimpleHttpResponseHandler<>(this, request.getUri(), stats), executor);
+        Futures.addCallback(future, new SimpleHttpResponseHandler<>(new TaskInfoResponseCallback(), request.getUri(), stats), executor);
     }
 
-    synchronized void updateTaskInfo(TaskInfo newValue)
+    synchronized void updateTaskInfo(TaskInfo newTaskInfo)
     {
+        TaskStatus localTaskStatus = taskStatusFetcher.getTaskStatus();
+        TaskStatus newRemoteTaskStatus = newTaskInfo.getTaskStatus();
+
+        TaskInfo newValue;
+        if (localTaskStatus.getState().isDone() && newRemoteTaskStatus.getState().isDone() && localTaskStatus.getState() != newRemoteTaskStatus.getState()) {
+            // prefer local
+            newValue = newTaskInfo.withTaskStatus(localTaskStatus);
+        }
+        else {
+            newValue = newTaskInfo;
+        }
+
         boolean updated = taskInfo.setIf(newValue, oldValue -> {
             TaskStatus oldTaskStatus = oldValue.getTaskStatus();
             TaskStatus newTaskStatus = newValue.getTaskStatus();
@@ -232,49 +241,51 @@ public class TaskInfoFetcher
         }
     }
 
-    @Override
-    public void success(TaskInfo newValue)
+    private class TaskInfoResponseCallback
+            implements SimpleHttpResponseCallback<TaskInfo>
     {
-        try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
-            lastUpdateNanos.set(System.nanoTime());
+        private final long requestStartNanos = System.nanoTime();
 
-            long startNanos;
-            synchronized (this) {
-                startNanos = this.currentRequestStartNanos.get();
+        @Override
+        public void success(TaskInfo newValue)
+        {
+            try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
+                lastUpdateNanos.set(System.nanoTime());
+
+                updateStats(requestStartNanos);
+                errorTracker.requestSucceeded();
+                updateTaskInfo(newValue);
             }
-            updateStats(startNanos);
-            errorTracker.requestSucceeded();
-            updateTaskInfo(newValue);
         }
-    }
 
-    @Override
-    public void failed(Throwable cause)
-    {
-        try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
-            lastUpdateNanos.set(System.nanoTime());
+        @Override
+        public void failed(Throwable cause)
+        {
+            try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
+                lastUpdateNanos.set(System.nanoTime());
 
-            try {
-                // if task not already done, record error
-                if (!isDone(getTaskInfo())) {
-                    errorTracker.requestFailed(cause);
+                try {
+                    // if task not already done, record error
+                    if (!isDone(getTaskInfo())) {
+                        errorTracker.requestFailed(cause);
+                    }
+                }
+                catch (Error e) {
+                    onFail.accept(e);
+                    throw e;
+                }
+                catch (RuntimeException e) {
+                    onFail.accept(e);
                 }
             }
-            catch (Error e) {
-                onFail.accept(e);
-                throw e;
-            }
-            catch (RuntimeException e) {
-                onFail.accept(e);
-            }
         }
-    }
 
-    @Override
-    public void fatal(Throwable cause)
-    {
-        try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
-            onFail.accept(cause);
+        @Override
+        public void fatal(Throwable cause)
+        {
+            try (SetThreadName ignored = new SetThreadName("TaskInfoFetcher-%s", taskId)) {
+                onFail.accept(cause);
+            }
         }
     }
 

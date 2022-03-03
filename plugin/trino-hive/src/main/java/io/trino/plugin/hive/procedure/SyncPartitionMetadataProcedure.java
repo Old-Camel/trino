@@ -19,7 +19,6 @@ import com.google.common.collect.Sets;
 import io.trino.plugin.hive.HdfsEnvironment;
 import io.trino.plugin.hive.PartitionStatistics;
 import io.trino.plugin.hive.TransactionalMetadataFactory;
-import io.trino.plugin.hive.authentication.HiveIdentity;
 import io.trino.plugin.hive.metastore.Column;
 import io.trino.plugin.hive.metastore.Partition;
 import io.trino.plugin.hive.metastore.SemiTransactionalHiveMetastore;
@@ -43,6 +42,7 @@ import java.io.IOException;
 import java.lang.invoke.MethodHandle;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -114,11 +114,10 @@ public class SyncPartitionMetadataProcedure
     {
         SyncMode syncMode = toSyncMode(mode);
         HdfsContext hdfsContext = new HdfsContext(session);
-        HiveIdentity identity = new HiveIdentity(session);
-        SemiTransactionalHiveMetastore metastore = hiveMetadataFactory.create().getMetastore();
+        SemiTransactionalHiveMetastore metastore = hiveMetadataFactory.create(session.getIdentity(), true).getMetastore();
         SchemaTableName schemaTableName = new SchemaTableName(schemaName, tableName);
 
-        Table table = metastore.getTable(identity, schemaName, tableName)
+        Table table = metastore.getTable(schemaName, tableName)
                 .orElseThrow(() -> new TableNotFoundException(schemaTableName));
         if (table.getPartitionColumns().isEmpty()) {
             throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Table is not partitioned: " + schemaTableName);
@@ -138,7 +137,7 @@ public class SyncPartitionMetadataProcedure
 
         try {
             FileSystem fileSystem = hdfsEnvironment.getFileSystem(hdfsContext, tableLocation);
-            List<String> partitionsInMetastore = metastore.getPartitionNames(identity, schemaName, tableName)
+            List<String> partitionsInMetastore = metastore.getPartitionNames(schemaName, tableName)
                     .orElseThrow(() -> new TableNotFoundException(schemaTableName));
             List<String> partitionsInFileSystem = listDirectory(fileSystem, fileSystem.getFileStatus(tableLocation), table.getPartitionColumns(), table.getPartitionColumns().size(), caseSensitive).stream()
                     .map(fileStatus -> fileStatus.getPath().toUri())
@@ -220,7 +219,9 @@ public class SyncPartitionMetadataProcedure
                     table.getTableName(),
                     buildPartitionObject(session, table, name),
                     new Path(table.getStorage().getLocation(), name),
-                    PartitionStatistics.empty());
+                    Optional.empty(), // no need for failed attempts cleanup
+                    PartitionStatistics.empty(),
+                    false);
         }
     }
 

@@ -16,24 +16,20 @@ package io.trino.sql.planner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
-import io.trino.connector.informationschema.InformationSchemaConnector;
-import io.trino.connector.system.SystemConnector;
-import io.trino.metadata.Catalog;
-import io.trino.metadata.Catalog.SecurityManagement;
-import io.trino.metadata.InMemoryNodeManager;
-import io.trino.metadata.InternalNodeManager;
+import io.trino.connector.StaticConnectorFactory;
+import io.trino.metadata.MaterializedViewDefinition;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.ViewColumn;
 import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.Connector;
-import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
-import io.trino.spi.connector.ConnectorMaterializedViewDefinition.Column;
 import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.security.Identity;
 import io.trino.spi.security.ViewExpression;
 import io.trino.spi.transaction.IsolationLevel;
 import io.trino.sql.planner.assertions.BasePlanTest;
@@ -44,8 +40,6 @@ import org.testng.annotations.Test;
 
 import java.util.Optional;
 
-import static io.trino.connector.CatalogName.createInformationSchemaCatalogName;
-import static io.trino.connector.CatalogName.createSystemTablesCatalogName;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -69,11 +63,10 @@ public class TestMaterializedViews
                 .setSchema(SCHEMA)
                 .setSystemProperty("task_concurrency", "1"); // these tests don't handle exchanges from local parallel
 
-        LocalQueryRunner queryRunner = LocalQueryRunner.create(sessionBuilder.build());
+        TestingMetadata testingConnectorMetadata = new TestingMetadata();
 
-        Catalog testCatalog = createTestingCatalog(CATALOG, new CatalogName(CATALOG), queryRunner);
-        queryRunner.getCatalogManager().registerCatalog(testCatalog);
-        TestingMetadata testingConnectorMetadata = (TestingMetadata) testCatalog.getConnector(new CatalogName(CATALOG)).getMetadata(null);
+        LocalQueryRunner queryRunner = LocalQueryRunner.create(sessionBuilder.build());
+        queryRunner.createCatalog(CATALOG, new StaticConnectorFactory("test", new TestMaterializedViewConnector(testingConnectorMetadata)), ImmutableMap.of());
 
         Metadata metadata = queryRunner.getMetadata();
         SchemaTableName testTable = new SchemaTableName(SCHEMA, "test_table");
@@ -119,14 +112,14 @@ public class TestMaterializedViews
         });
 
         QualifiedObjectName freshMaterializedView = new QualifiedObjectName(CATALOG, SCHEMA, "fresh_materialized_view");
-        ConnectorMaterializedViewDefinition materializedViewDefinition = new ConnectorMaterializedViewDefinition(
+        MaterializedViewDefinition materializedViewDefinition = new MaterializedViewDefinition(
                 "SELECT a, b FROM test_table",
-                Optional.of(new CatalogSchemaTableName(CATALOG, SCHEMA, "storage_table")),
                 Optional.of(CATALOG),
                 Optional.of(SCHEMA),
-                ImmutableList.of(new Column("a", BIGINT.getTypeId()), new Column("b", BIGINT.getTypeId())),
+                ImmutableList.of(new ViewColumn("a", BIGINT.getTypeId()), new ViewColumn("b", BIGINT.getTypeId())),
                 Optional.empty(),
-                "some user",
+                Identity.ofUser("some user"),
+                Optional.of(new CatalogSchemaTableName(CATALOG, SCHEMA, "storage_table")),
                 ImmutableMap.of());
         queryRunner.inTransaction(session -> {
             metadata.createMaterializedView(
@@ -150,14 +143,14 @@ public class TestMaterializedViews
             return null;
         });
 
-        ConnectorMaterializedViewDefinition materializedViewDefinitionWithCasts = new ConnectorMaterializedViewDefinition(
+        MaterializedViewDefinition materializedViewDefinitionWithCasts = new MaterializedViewDefinition(
                 "SELECT a, b FROM test_table",
-                Optional.of(new CatalogSchemaTableName(CATALOG, SCHEMA, "storage_table_with_casts")),
                 Optional.of(CATALOG),
                 Optional.of(SCHEMA),
-                ImmutableList.of(new Column("a", BIGINT.getTypeId()), new Column("b", BIGINT.getTypeId())),
+                ImmutableList.of(new ViewColumn("a", BIGINT.getTypeId()), new ViewColumn("b", BIGINT.getTypeId())),
                 Optional.empty(),
-                "some user",
+                Identity.ofUser("some user"),
+                Optional.of(new CatalogSchemaTableName(CATALOG, SCHEMA, "storage_table_with_casts")),
                 ImmutableMap.of());
         QualifiedObjectName materializedViewWithCasts = new QualifiedObjectName(CATALOG, SCHEMA, "materialized_view_with_casts");
         queryRunner.inTransaction(session -> {
@@ -208,43 +201,26 @@ public class TestMaterializedViews
                                 tableScan("storage_table_with_casts", ImmutableMap.of("A", "a", "B", "b")))));
     }
 
-    private Catalog createTestingCatalog(String catalogName, CatalogName catalog, LocalQueryRunner queryRunner)
+    private static class TestMaterializedViewConnector
+            implements Connector
     {
-        CatalogName systemId = createSystemTablesCatalogName(catalog);
-        Connector connector = createTestingConnector();
-        InternalNodeManager nodeManager = new InMemoryNodeManager();
-        return new Catalog(
-                catalogName,
-                catalog,
-                "test",
-                connector,
-                SecurityManagement.CONNECTOR,
-                createInformationSchemaCatalogName(catalog),
-                new InformationSchemaConnector(catalogName, nodeManager, queryRunner.getMetadata(), queryRunner.getAccessControl()),
-                systemId,
-                new SystemConnector(
-                        nodeManager,
-                        connector.getSystemTables(),
-                        transactionId -> queryRunner.getTransactionManager().getConnectorTransaction(transactionId, catalog)));
-    }
+        private final ConnectorMetadata metadata;
 
-    private static Connector createTestingConnector()
-    {
-        return new Connector()
+        public TestMaterializedViewConnector(ConnectorMetadata metadata)
         {
-            private final ConnectorMetadata metadata = new TestingMetadata();
+            this.metadata = metadata;
+        }
 
-            @Override
-            public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly)
-            {
-                return new ConnectorTransactionHandle() {};
-            }
+        @Override
+        public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly, boolean autoCommit)
+        {
+            return new ConnectorTransactionHandle() {};
+        }
 
-            @Override
-            public ConnectorMetadata getMetadata(ConnectorTransactionHandle transaction)
-            {
-                return metadata;
-            }
-        };
+        @Override
+        public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transaction)
+        {
+            return metadata;
+        }
     }
 }

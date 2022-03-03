@@ -16,9 +16,12 @@ package io.trino.operator;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.stats.CounterStat;
+import io.airlift.stats.TDigest;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.memory.QueryContextVisitor;
@@ -26,6 +29,8 @@ import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.operator.OperationTimer.OperationTiming;
+import io.trino.plugin.base.metrics.DurationTiming;
+import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.metrics.Metrics;
@@ -46,7 +51,6 @@ import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
-import static io.airlift.units.DataSize.succinctBytes;
 import static io.trino.operator.BlockedReason.WAITING_FOR_MEMORY;
 import static io.trino.operator.Operator.NOT_BLOCKED;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -71,6 +75,7 @@ public class OperatorContext
 
     private final CounterStat physicalInputDataSize = new CounterStat();
     private final CounterStat physicalInputPositions = new CounterStat();
+    private final AtomicLong physicalInputReadTimeNanos = new AtomicLong();
 
     private final CounterStat internalNetworkInputDataSize = new CounterStat();
     private final CounterStat internalNetworkPositions = new CounterStat();
@@ -101,7 +106,6 @@ public class OperatorContext
     private final AtomicReference<Supplier<List<OperatorStats>>> nestedOperatorStatsSupplier = new AtomicReference<>();
 
     private final AtomicLong peakUserMemoryReservation = new AtomicLong();
-    private final AtomicLong peakSystemMemoryReservation = new AtomicLong();
     private final AtomicLong peakRevocableMemoryReservation = new AtomicLong();
     private final AtomicLong peakTotalMemoryReservation = new AtomicLong();
 
@@ -179,7 +183,7 @@ public class OperatorContext
     {
         physicalInputDataSize.update(sizeInBytes);
         physicalInputPositions.update(positions);
-        addInputTiming.record(readNanos, 0);
+        physicalInputReadTimeNanos.getAndAdd(readNanos);
     }
 
     /**
@@ -273,21 +277,15 @@ public class OperatorContext
     }
 
     // caller should close this context as it's a new context
-    public LocalMemoryContext newLocalSystemMemoryContext(String allocationTag)
+    public LocalMemoryContext newLocalUserMemoryContext(String allocationTag)
     {
-        return new InternalLocalMemoryContext(operatorMemoryContext.newSystemMemoryContext(allocationTag), memoryFuture, this::updatePeakMemoryReservations, true);
+        return new InternalLocalMemoryContext(operatorMemoryContext.newUserMemoryContext(allocationTag), memoryFuture, this::updatePeakMemoryReservations, true);
     }
 
     // caller shouldn't close this context as it's managed by the OperatorContext
     public LocalMemoryContext localUserMemoryContext()
     {
         return new InternalLocalMemoryContext(operatorMemoryContext.localUserMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, false);
-    }
-
-    // caller shouldn't close this context as it's managed by the OperatorContext
-    public LocalMemoryContext localSystemMemoryContext()
-    {
-        return new InternalLocalMemoryContext(operatorMemoryContext.localSystemMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, false);
     }
 
     // caller shouldn't close this context as it's managed by the OperatorContext
@@ -303,12 +301,6 @@ public class OperatorContext
     }
 
     // caller shouldn't close this context as it's managed by the OperatorContext
-    public AggregatedMemoryContext aggregateSystemMemoryContext()
-    {
-        return new InternalAggregatedMemoryContext(operatorMemoryContext.aggregateSystemMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, false);
-    }
-
-    // caller shouldn't close this context as it's managed by the OperatorContext
     public AggregatedMemoryContext aggregateRevocableMemoryContext()
     {
         return new InternalAggregatedMemoryContext(operatorMemoryContext.aggregateRevocableMemoryContext(), revocableMemoryFuture, this::updatePeakMemoryReservations, false);
@@ -321,12 +313,6 @@ public class OperatorContext
     }
 
     // caller should close this context as it's a new context
-    public AggregatedMemoryContext newAggregateSystemMemoryContext()
-    {
-        return new InternalAggregatedMemoryContext(operatorMemoryContext.newAggregateSystemMemoryContext(), memoryFuture, this::updatePeakMemoryReservations, true);
-    }
-
-    // caller should close this context as it's a new context
     public AggregatedMemoryContext newAggregateRevocableMemoryContext()
     {
         return new InternalAggregatedMemoryContext(operatorMemoryContext.newAggregateRevocableMemoryContext(), revocableMemoryFuture, this::updatePeakMemoryReservations, true);
@@ -336,11 +322,12 @@ public class OperatorContext
     private void updatePeakMemoryReservations()
     {
         long userMemory = operatorMemoryContext.getUserMemory();
-        long systemMemory = operatorMemoryContext.getSystemMemory();
         long revocableMemory = operatorMemoryContext.getRevocableMemory();
-        long totalMemory = userMemory + systemMemory;
+        // TODO on cluster level, "total memory" means "user memory + revocable", and used to include the system memory.
+        //   Here, the total memory used to be user+system, and sans revocable. This apparent inconsistency should be removed.
+        //   Perhaps, we don't need to track "total memory" here.
+        long totalMemory = userMemory;
         peakUserMemoryReservation.accumulateAndGet(userMemory, Math::max);
-        peakSystemMemoryReservation.accumulateAndGet(systemMemory, Math::max);
         peakRevocableMemoryReservation.accumulateAndGet(revocableMemory, Math::max);
         peakTotalMemoryReservation.accumulateAndGet(totalMemory, Math::max);
     }
@@ -391,10 +378,6 @@ public class OperatorContext
 
         operatorMemoryContext.close();
 
-        if (operatorMemoryContext.getSystemMemory() != 0) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Operator %s has non-zero system memory (%d bytes) after destroy()", this, operatorMemoryContext.getSystemMemory()));
-        }
-
         if (operatorMemoryContext.getUserMemory() != 0) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Operator %s has non-zero user memory (%d bytes) after destroy()", this, operatorMemoryContext.getUserMemory()));
         }
@@ -407,11 +390,6 @@ public class OperatorContext
     public SpillContext getSpillContext()
     {
         return spillContext;
-    }
-
-    public void moreMemoryAvailable()
-    {
-        memoryFuture.get().set(null);
     }
 
     public synchronized boolean isMemoryRevokingRequested()
@@ -522,6 +500,23 @@ public class OperatorContext
                 .orElseGet(() -> ImmutableList.of(getOperatorStats()));
     }
 
+    public static Metrics getOperatorMetrics(Metrics operatorMetrics, long inputPositions)
+    {
+        TDigest digest = new TDigest();
+        digest.add(inputPositions);
+        return operatorMetrics.mergeWith(new Metrics(ImmutableMap.of("Input distribution", new TDigestHistogram(digest))));
+    }
+
+    public static Metrics getConnectorMetrics(Metrics connectorMetrics, long physicalInputReadTimeNanos)
+    {
+        if (physicalInputReadTimeNanos == 0) {
+            return connectorMetrics;
+        }
+
+        return connectorMetrics.mergeWith(new Metrics(ImmutableMap.of(
+                "Physical input read time", new DurationTiming(new Duration(physicalInputReadTimeNanos, NANOSECONDS)))));
+    }
+
     public <C, R> R accept(QueryContextVisitor<C, R> visitor, C context)
     {
         return visitor.visitOperatorContext(this, context);
@@ -546,26 +541,26 @@ public class OperatorContext
                 addInputTiming.getCalls(),
                 new Duration(addInputTiming.getWallNanos(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(addInputTiming.getCpuNanos(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
-                succinctBytes(physicalInputDataSize.getTotalCount()),
+                DataSize.ofBytes(physicalInputDataSize.getTotalCount()),
                 physicalInputPositions.getTotalCount(),
-                succinctBytes(internalNetworkInputDataSize.getTotalCount()),
+                DataSize.ofBytes(internalNetworkInputDataSize.getTotalCount()),
                 internalNetworkPositions.getTotalCount(),
-                succinctBytes(physicalInputDataSize.getTotalCount() + internalNetworkInputDataSize.getTotalCount()),
-                succinctBytes(inputDataSize.getTotalCount()),
+                DataSize.ofBytes(physicalInputDataSize.getTotalCount() + internalNetworkInputDataSize.getTotalCount()),
+                DataSize.ofBytes(inputDataSize.getTotalCount()),
                 inputPositionsCount,
                 (double) inputPositionsCount * inputPositionsCount,
 
                 getOutputTiming.getCalls(),
                 new Duration(getOutputTiming.getWallNanos(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(getOutputTiming.getCpuNanos(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
-                succinctBytes(outputDataSize.getTotalCount()),
+                DataSize.ofBytes(outputDataSize.getTotalCount()),
                 outputPositions.getTotalCount(),
 
                 dynamicFilterSplitsProcessed.get(),
-                metrics.get(),
-                connectorMetrics.get(),
+                getOperatorMetrics(metrics.get(), inputPositionsCount),
+                getConnectorMetrics(connectorMetrics.get(), physicalInputReadTimeNanos.get()),
 
-                succinctBytes(physicalWrittenDataSize.get()),
+                DataSize.ofBytes(physicalWrittenDataSize.get()),
 
                 new Duration(blockedWallNanos.get(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
 
@@ -573,16 +568,14 @@ public class OperatorContext
                 new Duration(finishTiming.getWallNanos(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(finishTiming.getCpuNanos(), NANOSECONDS).convertToMostSuccinctTimeUnit(),
 
-                succinctBytes(operatorMemoryContext.getUserMemory()),
-                succinctBytes(getReservedRevocableBytes()),
-                succinctBytes(operatorMemoryContext.getSystemMemory()),
+                DataSize.ofBytes(operatorMemoryContext.getUserMemory()),
+                DataSize.ofBytes(getReservedRevocableBytes()),
 
-                succinctBytes(peakUserMemoryReservation.get()),
-                succinctBytes(peakSystemMemoryReservation.get()),
-                succinctBytes(peakRevocableMemoryReservation.get()),
-                succinctBytes(peakTotalMemoryReservation.get()),
+                DataSize.ofBytes(peakUserMemoryReservation.get()),
+                DataSize.ofBytes(peakRevocableMemoryReservation.get()),
+                DataSize.ofBytes(peakTotalMemoryReservation.get()),
 
-                succinctBytes(spillContext.getSpilledBytes()),
+                DataSize.ofBytes(spillContext.getSpilledBytes()),
 
                 memoryFuture.get().isDone() ? Optional.empty() : Optional.of(WAITING_FOR_MEMORY),
                 info);

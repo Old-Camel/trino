@@ -30,6 +30,7 @@ import io.trino.spi.type.Type;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
@@ -132,10 +133,10 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public void abortReadConnection(Connection connection)
+    public void abortReadConnection(Connection connection, ResultSet resultSet)
             throws SQLException
     {
-        delegate().abortReadConnection(connection);
+        delegate().abortReadConnection(connection, resultSet);
     }
 
     @Override
@@ -287,7 +288,7 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Object> properties)
+    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> properties)
     {
         delegate().setTableProperties(session, handle, properties);
     }
@@ -308,6 +309,12 @@ public abstract class ForwardingJdbcClient
     public void dropSchema(ConnectorSession session, String schemaName)
     {
         delegate().dropSchema(session, schemaName);
+    }
+
+    @Override
+    public void renameSchema(ConnectorSession session, String schemaName, String newSchemaName)
+    {
+        delegate().renameSchema(session, schemaName, newSchemaName);
     }
 
     @Override
@@ -344,5 +351,11 @@ public abstract class ForwardingJdbcClient
     public OptionalLong delete(ConnectorSession session, JdbcTableHandle handle)
     {
         return delegate().delete(session, handle);
+    }
+
+    @Override
+    public void truncateTable(ConnectorSession session, JdbcTableHandle handle)
+    {
+        delegate().truncateTable(session, handle);
     }
 }

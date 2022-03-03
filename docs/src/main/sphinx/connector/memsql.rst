@@ -12,7 +12,7 @@ Requirements
 
 To connect to SingleStore, you need:
 
-* SingleStore version 7.3 or higher.
+* SingleStore version 7.1.4 or higher.
 * Network access from the Trino coordinator and workers to SingleStore. Port
   3306 is the default port.
 
@@ -32,6 +32,26 @@ connection properties as appropriate for your setup:
     connection-user=root
     connection-password=secret
 
+.. _singlestore-tls:
+
+Connection security
+^^^^^^^^^^^^^^^^^^^
+
+If you have TLS configured with a globally-trusted certificate installed on your
+data source, you can enable TLS between your cluster and the data
+source by appending a parameter to the JDBC connection string set in the
+``connection-url`` catalog configuration property.
+
+Enable TLS between your cluster and SingleStore by appending the ``useSsl=true``
+parameter to the ``connection-url`` configuration property:
+
+.. code-block:: properties
+
+  connection-url=jdbc:mariadb://example.net:3306/?useSsl=true
+
+For more information on TLS configuration options, see the `JDBC driver
+documentation <https://mariadb.com/kb/en/about-mariadb-connector-j/#tls-parameters>`_.
+
 Multiple SingleStore servers
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -42,6 +62,8 @@ example, if you name the property file ``sales.properties``, Trino
 will create a catalog named ``sales`` using the configured connector.
 
 .. include:: jdbc-common-configurations.fragment
+
+.. include:: jdbc-procedures.fragment
 
 .. include:: jdbc-case-insensitive-matching.fragment
 
@@ -73,14 +95,14 @@ Finally, you can access the ``clicks`` table in the ``web`` database::
 If you used a different name for your catalog properties file, use
 that catalog name instead of ``memsql`` in the above examples.
 
-.. _memsql-type-mapping:
+.. _singlestore-type-mapping:
 
 Type mapping
 ------------
 
 .. include:: jdbc-type-mapping.fragment
 
-.. _memsql-pushdown:
+.. _singlestore-pushdown:
 
 Pushdown
 --------
@@ -90,6 +112,8 @@ The connector supports pushdown for a number of operations:
 * :ref:`join-pushdown`
 * :ref:`limit-pushdown`
 * :ref:`topn-pushdown`
+
+.. include:: no-pushdown-text-type.fragment
 
 .. _singlestore-sql-support:
 
@@ -103,6 +127,7 @@ statements, the connector supports the following features:
 
 * :doc:`/sql/insert`
 * :doc:`/sql/delete`
+* :doc:`/sql/truncate`
 * :doc:`/sql/create-table`
 * :doc:`/sql/create-table-as`
 * :doc:`/sql/drop-table`
