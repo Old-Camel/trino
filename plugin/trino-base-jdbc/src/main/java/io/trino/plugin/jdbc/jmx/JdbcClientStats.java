@@ -29,6 +29,8 @@ public final class JdbcClientStats
     private final JdbcApiStats commitCreateTable = new JdbcApiStats();
     private final JdbcApiStats createSchema = new JdbcApiStats();
     private final JdbcApiStats createTable = new JdbcApiStats();
+    private final JdbcApiStats getTableComment = new JdbcApiStats();
+    private final JdbcApiStats setTableComment = new JdbcApiStats();
     private final JdbcApiStats setColumnComment = new JdbcApiStats();
     private final JdbcApiStats dropColumn = new JdbcApiStats();
     private final JdbcApiStats dropSchema = new JdbcApiStats();
@@ -42,6 +44,7 @@ public final class JdbcClientStats
     private final JdbcApiStats getSchemaNames = new JdbcApiStats();
     private final JdbcApiStats getSplits = new JdbcApiStats();
     private final JdbcApiStats getTableHandle = new JdbcApiStats();
+    private final JdbcApiStats getTableHandleForQuery = new JdbcApiStats();
     private final JdbcApiStats getTableNames = new JdbcApiStats();
     private final JdbcApiStats getTableStatistics = new JdbcApiStats();
     private final JdbcApiStats renameColumn = new JdbcApiStats();
@@ -49,10 +52,11 @@ public final class JdbcClientStats
     private final JdbcApiStats setTableProperties = new JdbcApiStats();
     private final JdbcApiStats rollbackCreateTable = new JdbcApiStats();
     private final JdbcApiStats schemaExists = new JdbcApiStats();
-    private final JdbcApiStats toPrestoType = new JdbcApiStats();
+    private final JdbcApiStats toTrinoType = new JdbcApiStats();
     private final JdbcApiStats getColumnMappings = new JdbcApiStats();
     private final JdbcApiStats toWriteMapping = new JdbcApiStats();
     private final JdbcApiStats implementAggregation = new JdbcApiStats();
+    private final JdbcApiStats convertPredicate = new JdbcApiStats();
     private final JdbcApiStats getTableScanRedirection = new JdbcApiStats();
     private final JdbcApiStats delete = new JdbcApiStats();
     private final JdbcApiStats truncateTable = new JdbcApiStats();
@@ -132,6 +136,20 @@ public final class JdbcClientStats
     public JdbcApiStats getCreateTable()
     {
         return createTable;
+    }
+
+    @Managed
+    @Nested
+    public JdbcApiStats getGetTableComment()
+    {
+        return getTableComment;
+    }
+
+    @Managed
+    @Nested
+    public JdbcApiStats getSetTableComment()
+    {
+        return setTableComment;
     }
 
     @Managed
@@ -227,6 +245,13 @@ public final class JdbcClientStats
 
     @Managed
     @Nested
+    public JdbcApiStats getGetTableHandleForQuery()
+    {
+        return getTableHandleForQuery;
+    }
+
+    @Managed
+    @Nested
     public JdbcApiStats getGetTableNames()
     {
         return getTableNames;
@@ -276,9 +301,9 @@ public final class JdbcClientStats
 
     @Managed
     @Nested
-    public JdbcApiStats getToPrestoType()
+    public JdbcApiStats getToTrinoType()
     {
-        return toPrestoType;
+        return toTrinoType;
     }
 
     @Managed
@@ -300,6 +325,13 @@ public final class JdbcClientStats
     public JdbcApiStats getImplementAggregation()
     {
         return implementAggregation;
+    }
+
+    @Managed
+    @Nested
+    public JdbcApiStats getConvertPredicate()
+    {
+        return convertPredicate;
     }
 
     @Managed

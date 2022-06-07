@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.base.classloader;
 
+import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
@@ -20,11 +21,15 @@ import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorRecordSetProvider;
+import io.trino.spi.connector.ConnectorSecurityContext;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.RecordSet;
+import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.eventlistener.EventListener;
+import io.trino.spi.ptf.ConnectorTableFunction;
+import io.trino.spi.type.Type;
 import org.testng.annotations.Test;
 
 import static io.trino.spi.testing.InterfaceTestUtils.assertAllMethodsOverridden;
@@ -33,8 +38,11 @@ public class TestClassLoaderSafeWrappers
 {
     @Test
     public void testAllMethodsOverridden()
+            throws NoSuchMethodException
     {
-        assertAllMethodsOverridden(ConnectorAccessControl.class, ClassLoaderSafeConnectorAccessControl.class);
+        assertAllMethodsOverridden(ConnectorAccessControl.class, ClassLoaderSafeConnectorAccessControl.class, ImmutableSet.of(
+                ClassLoaderSafeConnectorAccessControl.class.getMethod("getRowFilter", ConnectorSecurityContext.class, SchemaTableName.class),
+                ClassLoaderSafeConnectorAccessControl.class.getMethod("getColumnMask", ConnectorSecurityContext.class, SchemaTableName.class, String.class, Type.class)));
         assertAllMethodsOverridden(ConnectorMetadata.class, ClassLoaderSafeConnectorMetadata.class);
         assertAllMethodsOverridden(ConnectorPageSink.class, ClassLoaderSafeConnectorPageSink.class);
         assertAllMethodsOverridden(ConnectorPageSinkProvider.class, ClassLoaderSafeConnectorPageSinkProvider.class);
@@ -46,5 +54,6 @@ public class TestClassLoaderSafeWrappers
         assertAllMethodsOverridden(ConnectorRecordSetProvider.class, ClassLoaderSafeConnectorRecordSetProvider.class);
         assertAllMethodsOverridden(RecordSet.class, ClassLoaderSafeRecordSet.class);
         assertAllMethodsOverridden(EventListener.class, ClassLoaderSafeEventListener.class);
+        assertAllMethodsOverridden(ConnectorTableFunction.class, ClassLoaderSafeConnectorTableFunction.class);
     }
 }

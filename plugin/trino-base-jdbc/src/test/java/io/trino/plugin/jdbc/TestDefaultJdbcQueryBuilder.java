@@ -93,7 +93,8 @@ public class TestDefaultJdbcQueryBuilder
 {
     private static final JdbcNamedRelationHandle TEST_TABLE = new JdbcNamedRelationHandle(new SchemaTableName(
             "some_test_schema", "test_table"),
-            new RemoteTableName(Optional.empty(), Optional.empty(), "test_table"));
+            new RemoteTableName(Optional.empty(), Optional.empty(), "test_table"),
+            Optional.empty());
     private static final ConnectorSession SESSION = TestingConnectorSession.builder()
             .setPropertyMetadata(new JdbcMetadataSessionProperties(new JdbcMetadataConfig(), Optional.empty()).getSessionProperties())
             .build();
@@ -456,9 +457,9 @@ public class TestDefaultJdbcQueryBuilder
         TupleDomain<ColumnHandle> tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(
                 columns.get(6), Domain.create(SortedRangeSet.copyOf(TIMESTAMP_MILLIS,
                         ImmutableList.of(
-                                Range.equal(TIMESTAMP_MILLIS, toPrestoTimestamp(2016, 6, 3, 0, 23, 37)),
-                                Range.equal(TIMESTAMP_MILLIS, toPrestoTimestamp(2016, 10, 19, 16, 23, 37)),
-                                Range.range(TIMESTAMP_MILLIS, toPrestoTimestamp(2016, 6, 7, 8, 23, 37), false, toPrestoTimestamp(2016, 6, 9, 12, 23, 37), true))),
+                                Range.equal(TIMESTAMP_MILLIS, toTrinoTimestamp(2016, 6, 3, 0, 23, 37)),
+                                Range.equal(TIMESTAMP_MILLIS, toTrinoTimestamp(2016, 10, 19, 16, 23, 37)),
+                                Range.range(TIMESTAMP_MILLIS, toTrinoTimestamp(2016, 6, 7, 8, 23, 37), false, toTrinoTimestamp(2016, 6, 9, 12, 23, 37), true))),
                         false)));
 
         Connection connection = database.getConnection();
@@ -653,7 +654,7 @@ public class TestDefaultJdbcQueryBuilder
         }
     }
 
-    private static long toPrestoTimestamp(int year, int month, int day, int hour, int minute, int second)
+    private static long toTrinoTimestamp(int year, int month, int day, int hour, int minute, int second)
     {
         return sqlTimestampOf(3, year, month, day, hour, minute, second, 0).getMillis() * MICROSECONDS_PER_MILLISECOND;
     }

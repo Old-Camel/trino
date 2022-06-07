@@ -16,6 +16,7 @@ package io.trino.plugin.raptor.legacy;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.SetMultimap;
+import io.trino.Session;
 import io.trino.spi.type.ArrayType;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.MaterializedResult;
@@ -54,6 +55,7 @@ import static java.lang.String.format;
 import static java.util.Arrays.asList;
 import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.toSet;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -72,11 +74,18 @@ public abstract class BaseRaptorConnectorTest
                 return true;
             case SUPPORTS_CREATE_SCHEMA:
             case SUPPORTS_RENAME_SCHEMA:
+            case SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT:
+            case SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT:
             case SUPPORTS_COMMENT_ON_TABLE:
             case SUPPORTS_COMMENT_ON_COLUMN:
+            case SUPPORTS_ADD_COLUMN_WITH_COMMENT:
             case SUPPORTS_NOT_NULL_CONSTRAINT:
             case SUPPORTS_TOPN_PUSHDOWN:
                 return false;
+
+            case SUPPORTS_ROW_TYPE:
+                return false;
+
             default:
                 return super.hasBehavior(connectorBehavior);
         }
@@ -93,7 +102,7 @@ public abstract class BaseRaptorConnectorTest
     public void testCharVarcharComparison()
     {
         assertThatThrownBy(super::testCharVarcharComparison)
-                .hasMessage("No storage type for type: char(3)");
+                .hasMessage("Unsupported type: char(3)");
     }
 
     @Test
@@ -106,16 +115,16 @@ public abstract class BaseRaptorConnectorTest
 
         String schemaName = "test_schema_" + randomTableSuffix();
 
-        String renamedTable = schemaName + ".test_rename_new_" + randomTableSuffix();
-        assertUpdate("ALTER TABLE " + tableName + " RENAME TO " + renamedTable);
+        String renamedTable = "test_rename_new_" + randomTableSuffix();
+        assertUpdate("ALTER TABLE " + tableName + " RENAME TO " + schemaName + "." + renamedTable);
 
         assertFalse(getQueryRunner().tableExists(getSession(), tableName));
-        assertQuery("SELECT x FROM " + renamedTable, "VALUES 123");
+        assertQuery("SELECT x FROM " + schemaName + "." + renamedTable, "VALUES 123");
 
-        assertUpdate("DROP TABLE " + renamedTable);
+        assertUpdate("DROP TABLE " + schemaName + "." + renamedTable);
 
         assertFalse(getQueryRunner().tableExists(getSession(), tableName));
-        assertFalse(getQueryRunner().tableExists(getSession(), renamedTable));
+        assertFalse(getQueryRunner().tableExists(Session.builder(getSession()).setSchema(schemaName).build(), renamedTable));
     }
 
     @Override
@@ -126,7 +135,10 @@ public abstract class BaseRaptorConnectorTest
                 || typeName.equals("real")
                 || typeName.startsWith("decimal(")
                 || typeName.equals("time")
+                || typeName.equals("time(6)")
+                || typeName.equals("timestamp(6)")
                 || typeName.equals("timestamp(3) with time zone")
+                || typeName.equals("timestamp(6) with time zone")
                 || typeName.startsWith("char(")) {
             //TODO this should either work or fail cleanly
             return Optional.empty();
@@ -655,6 +667,24 @@ public abstract class BaseRaptorConnectorTest
     }
 
     @Test
+    @Override
+    public void testCreateTableSchemaNotFound()
+    {
+        // TODO (https://github.com/trinodb/trino/issues/11110) Raptor connector can create new tables in a schema where it doesn't exist
+        assertThatThrownBy(super::testCreateTableSchemaNotFound)
+                .hasMessageContaining("Expected query to fail: CREATE TABLE test_schema_");
+    }
+
+    @Test
+    @Override
+    public void testCreateTableAsSelectSchemaNotFound()
+    {
+        // TODO (https://github.com/trinodb/trino/issues/11110) Raptor connector can create new tables in a schema where it doesn't exist
+        assertThatThrownBy(super::testCreateTableAsSelectSchemaNotFound)
+                .hasMessageContaining("Expected query to fail: CREATE TABLE test_schema_");
+    }
+
+    @Test
     public void testTablesSystemTable()
     {
         assertUpdate("" +
@@ -855,5 +885,17 @@ public abstract class BaseRaptorConnectorTest
         assertUpdate("DELETE FROM test_alter_table WHERE c1 = 22", 3);
 
         assertUpdate("DROP TABLE test_alter_table");
+    }
+
+    @Override
+    protected void verifyConcurrentAddColumnFailurePermissible(Exception e)
+    {
+        assertThat(e)
+                .hasMessageContaining("Failed to perform metadata operation")
+                .getCause()
+                .hasMessageMatching(
+                        "(?s).*SQLIntegrityConstraintViolationException.*" +
+                                "|.*Unique index or primary key violation.*" +
+                                "|.*Deadlock found when trying to get lock; try restarting transaction.*");
     }
 }

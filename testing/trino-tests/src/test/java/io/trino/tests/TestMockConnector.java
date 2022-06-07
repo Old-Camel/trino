@@ -16,9 +16,11 @@ package io.trino.tests;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.trino.Session;
 import io.trino.connector.MockConnectorFactory;
 import io.trino.connector.MockConnectorPlugin;
 import io.trino.connector.MockConnectorTableHandle;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.procedure.TestProcedure;
 import io.trino.spi.connector.CatalogSchemaTableName;
@@ -26,6 +28,7 @@ import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
 import io.trino.spi.connector.ConnectorMaterializedViewDefinition.Column;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
@@ -93,6 +96,7 @@ public class TestMockConnector
                                     }
                                     throw new UnsupportedOperationException();
                                 })
+                                .withMetrics(schemaTableName -> new Metrics(ImmutableMap.of("test_metric", new LongCount(1))))
                                 .withProcedures(ImmutableSet.of(new TestProcedure().get()))
                                 .withSchemaProperties(() -> ImmutableList.<PropertyMetadata<?>>builder()
                                         .add(booleanProperty("boolean_schema_property", "description", false, false))
@@ -208,6 +212,16 @@ public class TestMockConnector
         assertUpdate("CREATE SCHEMA mock.test_schema WITH (boolean_schema_property = true)");
         assertThatThrownBy(() -> assertUpdate("CREATE SCHEMA mock.test_schema WITH (unknown_property = true)"))
                 .hasMessage("Catalog 'mock' schema property 'unknown_property' does not exist");
+    }
+
+    @Test
+    public void testExecuteWithSchemaProperties()
+    {
+        String query = "CREATE SCHEMA mock.test_schema WITH (boolean_schema_property = ?)";
+        Session session = Session.builder(getSession())
+                .addPreparedStatement("my_query", query)
+                .build();
+        computeActual(session, "EXECUTE my_query USING true");
     }
 
     @Test

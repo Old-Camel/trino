@@ -42,7 +42,7 @@ public class TestQueryManagerConfig
                 .setMinQueryExpireAge(new Duration(15, MINUTES))
                 .setMaxQueryHistory(100)
                 .setMaxQueryLength(1_000_000)
-                .setMaxStageCount(100)
+                .setMaxStageCount(150)
                 .setStageCountWarningThreshold(50)
                 .setClientTimeout(new Duration(5, MINUTES))
                 .setScheduleSplitBatchSize(1000)
@@ -63,14 +63,19 @@ public class TestQueryManagerConfig
                 .setRequiredWorkers(1)
                 .setRequiredWorkersMaxWait(new Duration(5, MINUTES))
                 .setRetryPolicy(RetryPolicy.NONE)
-                .setRetryAttempts(4)
+                .setQueryRetryAttempts(4)
+                .setTaskRetryAttemptsOverall(Integer.MAX_VALUE)
+                .setTaskRetryAttemptsPerTask(4)
                 .setRetryInitialDelay(new Duration(10, SECONDS))
                 .setRetryMaxDelay(new Duration(1, MINUTES))
+                .setRetryDelayScaleFactor(2.0)
+                .setMaxTasksWaitingForNodePerStage(5)
                 .setFaultTolerantExecutionTargetTaskInputSize(DataSize.of(1, GIGABYTE))
                 .setFaultTolerantExecutionMinTaskSplitCount(16)
                 .setFaultTolerantExecutionTargetTaskSplitCount(16)
                 .setFaultTolerantExecutionMaxTaskSplitCount(256)
-                .setFaultTolerantExecutionTaskDescriptorStorageMaxMemory(DataSize.ofBytes(Math.round(AVAILABLE_HEAP_MEMORY * 0.15))));
+                .setFaultTolerantExecutionTaskDescriptorStorageMaxMemory(DataSize.ofBytes(Math.round(AVAILABLE_HEAP_MEMORY * 0.15)))
+                .setFaultTolerantExecutionPartitionCount(50));
     }
 
     @Test
@@ -101,14 +106,19 @@ public class TestQueryManagerConfig
                 .put("query-manager.required-workers", "333")
                 .put("query-manager.required-workers-max-wait", "33m")
                 .put("retry-policy", "QUERY")
-                .put("retry-attempts", "0")
+                .put("query-retry-attempts", "0")
+                .put("task-retry-attempts-overall", "17")
+                .put("task-retry-attempts-per-task", "9")
                 .put("retry-initial-delay", "1m")
                 .put("retry-max-delay", "1h")
+                .put("retry-delay-scale-factor", "2.3")
+                .put("max-tasks-waiting-for-node-per-stage", "3")
                 .put("fault-tolerant-execution-target-task-input-size", "222MB")
                 .put("fault-tolerant-execution-min-task-split-count", "2")
                 .put("fault-tolerant-execution-target-task-split-count", "3")
                 .put("fault-tolerant-execution-max-task-split-count", "22")
                 .put("fault-tolerant-execution-task-descriptor-storage-max-memory", "3GB")
+                .put("fault-tolerant-execution-partition-count", "123")
                 .buildOrThrow();
 
         QueryManagerConfig expected = new QueryManagerConfig()
@@ -136,14 +146,19 @@ public class TestQueryManagerConfig
                 .setRequiredWorkers(333)
                 .setRequiredWorkersMaxWait(new Duration(33, MINUTES))
                 .setRetryPolicy(RetryPolicy.QUERY)
-                .setRetryAttempts(0)
+                .setQueryRetryAttempts(0)
+                .setTaskRetryAttemptsOverall(17)
+                .setTaskRetryAttemptsPerTask(9)
                 .setRetryInitialDelay(new Duration(1, MINUTES))
                 .setRetryMaxDelay(new Duration(1, HOURS))
+                .setRetryDelayScaleFactor(2.3)
+                .setMaxTasksWaitingForNodePerStage(3)
                 .setFaultTolerantExecutionTargetTaskInputSize(DataSize.of(222, MEGABYTE))
                 .setFaultTolerantExecutionMinTaskSplitCount(2)
                 .setFaultTolerantExecutionTargetTaskSplitCount(3)
                 .setFaultTolerantExecutionMaxTaskSplitCount(22)
-                .setFaultTolerantExecutionTaskDescriptorStorageMaxMemory(DataSize.of(3, GIGABYTE));
+                .setFaultTolerantExecutionTaskDescriptorStorageMaxMemory(DataSize.of(3, GIGABYTE))
+                .setFaultTolerantExecutionPartitionCount(123);
 
         assertFullMapping(properties, expected);
     }

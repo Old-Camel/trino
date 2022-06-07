@@ -13,19 +13,23 @@
  */
 package io.trino.testing;
 
+import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.UncheckedTimeoutException;
 import io.airlift.units.Duration;
-import io.trino.FeaturesConfig.JoinDistributionType;
 import io.trino.Session;
+import io.trino.connector.CatalogName;
 import io.trino.cost.StatsAndCosts;
 import io.trino.dispatcher.DispatchManager;
 import io.trino.execution.QueryInfo;
 import io.trino.execution.QueryManager;
+import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.server.BasicQueryInfo;
+import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.testing.sql.TestTable;
@@ -34,19 +38,28 @@ import org.testng.SkipException;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
@@ -62,13 +75,16 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.QueryAssertions.assertContains;
 import static io.trino.testing.QueryAssertions.getTrinoExceptionCause;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_ADD_COLUMN;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_ADD_COLUMN_WITH_COMMENT;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_ARRAY;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_COMMENT_ON_COLUMN;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_COMMENT_ON_TABLE;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_MATERIALIZED_VIEW;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_SCHEMA;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_TABLE;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_TABLE_WITH_DATA;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_VIEW;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_DELETE;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_DROP_COLUMN;
@@ -83,12 +99,14 @@ import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_RENAME_SCHEMA;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_RENAME_TABLE;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_ROW_LEVEL_DELETE;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_ROW_TYPE;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_TOPN_PUSHDOWN;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_TRUNCATE;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_UPDATE;
 import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import static io.trino.transaction.TransactionBuilder.transaction;
 import static java.lang.String.format;
 import static java.lang.String.join;
 import static java.lang.Thread.currentThread;
@@ -104,7 +122,9 @@ import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.fail;
 
 /**
  * Generic test for connectors.
@@ -150,11 +170,11 @@ public abstract class BaseConnectorTest
     {
         String schemaName = "test_schema_create_" + randomTableSuffix();
         if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
-            assertQueryFails("CREATE SCHEMA " + schemaName, "This connector does not support creating schemas");
+            assertQueryFails(createSchemaSql(schemaName), "This connector does not support creating schemas");
             return;
         }
         assertThat(computeActual("SHOW SCHEMAS").getOnlyColumnAsSet()).doesNotContain(schemaName);
-        assertUpdate("CREATE SCHEMA " + schemaName);
+        assertUpdate(createSchemaSql(schemaName));
 
         // verify listing of new schema
         assertThat(computeActual("SHOW SCHEMAS").getOnlyColumnAsSet()).contains(schemaName);
@@ -164,7 +184,7 @@ public abstract class BaseConnectorTest
                 .startsWith(format("CREATE SCHEMA %s.%s", getSession().getCatalog().orElseThrow(), schemaName));
 
         // try to create duplicate schema
-        assertQueryFails("CREATE SCHEMA " + schemaName, format("line 1:1: Schema '.*\\.%s' already exists", schemaName));
+        assertQueryFails(createSchemaSql(schemaName), format("line 1:1: Schema '.*\\.%s' already exists", schemaName));
 
         // cleanup
         assertUpdate("DROP SCHEMA " + schemaName);
@@ -174,9 +194,9 @@ public abstract class BaseConnectorTest
     }
 
     @Test
-    public void testDropNonEmptySchema()
+    public void testDropNonEmptySchemaWithTable()
     {
-        String schemaName = "test_drop_non_empty_schema_" + randomTableSuffix();
+        String schemaName = "test_drop_non_empty_schema_table_" + randomTableSuffix();
         // A connector either supports CREATE SCHEMA and DROP SCHEMA or none of them.
         if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
             return;
@@ -189,6 +209,54 @@ public abstract class BaseConnectorTest
         }
         finally {
             assertUpdate("DROP TABLE IF EXISTS " + schemaName + ".t");
+            assertUpdate("DROP SCHEMA IF EXISTS " + schemaName);
+        }
+    }
+
+    @Test
+    public void testDropNonEmptySchemaWithView()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_VIEW));
+
+        // A connector either supports CREATE SCHEMA and DROP SCHEMA or none of them.
+        if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
+            return;
+        }
+
+        String schemaName = "test_drop_non_empty_schema_view_" + randomTableSuffix();
+
+        try {
+            assertUpdate("CREATE SCHEMA " + schemaName);
+            assertUpdate("CREATE VIEW " + schemaName + ".v_t  AS SELECT 123 x");
+
+            assertQueryFails("DROP SCHEMA " + schemaName, ".*Cannot drop non-empty schema '\\Q" + schemaName + "\\E'");
+        }
+        finally {
+            assertUpdate("DROP VIEW IF EXISTS " + schemaName + ".v_t");
+            assertUpdate("DROP SCHEMA IF EXISTS " + schemaName);
+        }
+    }
+
+    @Test
+    public void testDropNonEmptySchemaWithMaterializedView()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_MATERIALIZED_VIEW));
+
+        // A connector either supports CREATE SCHEMA and DROP SCHEMA or none of them.
+        if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
+            return;
+        }
+
+        String schemaName = "test_drop_non_empty_schema_mv_" + randomTableSuffix();
+
+        try {
+            assertUpdate("CREATE SCHEMA " + schemaName);
+            assertUpdate("CREATE MATERIALIZED VIEW " + schemaName + ".mv_t  AS SELECT 123 x");
+
+            assertQueryFails("DROP SCHEMA " + schemaName, ".*Cannot drop non-empty schema '\\Q" + schemaName + "\\E'");
+        }
+        finally {
+            assertUpdate("DROP MATERIALIZED VIEW IF EXISTS " + schemaName + ".mv_t");
             assertUpdate("DROP SCHEMA IF EXISTS " + schemaName);
         }
     }
@@ -313,6 +381,15 @@ public abstract class BaseConnectorTest
         assertQuery(
                 "SELECT regionkey, avg(nationkey) FROM nation GROUP BY regionkey",
                 "SELECT regionkey, avg(CAST(nationkey AS double)) FROM nation GROUP BY regionkey");
+
+        // pruned away aggregation (simplified regression test for https://github.com/trinodb/trino/issues/12598)
+        assertQuery(
+                "SELECT -13 FROM (SELECT count(*) FROM nation)",
+                "VALUES -13");
+        // regression test for https://github.com/trinodb/trino/issues/12598
+        assertQuery(
+                "SELECT count(*) FROM (SELECT count(*) FROM nation UNION ALL SELECT count(*) FROM region)",
+                "VALUES 2");
     }
 
     @Test
@@ -429,6 +506,16 @@ public abstract class BaseConnectorTest
     public void testSelectAll()
     {
         assertQuery("SELECT * FROM orders");
+    }
+
+    @Test
+    public void testSelectInTransaction()
+    {
+        inTransaction(session -> {
+            assertQuery(session, "SELECT nationkey, name, regionkey FROM nation");
+            assertQuery(session, "SELECT regionkey, name FROM region");
+            assertQuery(session, "SELECT nationkey, name, regionkey FROM nation");
+        });
     }
 
     /**
@@ -1199,6 +1286,184 @@ public abstract class BaseConnectorTest
                 .containsAll("VALUES '" + viewName + "'");
     }
 
+    /**
+     * Test that reading table, column metadata, like {@code SHOW TABLES} or reading from {@code information_schema.views}
+     * does not fail when relations are concurrently created or dropped.
+     */
+    @Test(timeOut = 180_000)
+    public void testReadMetadataWithRelationsConcurrentModifications()
+            throws Exception
+    {
+        if (!hasBehavior(SUPPORTS_CREATE_TABLE) && !hasBehavior(SUPPORTS_CREATE_VIEW) && !hasBehavior(SUPPORTS_CREATE_MATERIALIZED_VIEW)) {
+            throw new SkipException("Cannot test");
+        }
+
+        int readIterations = 5;
+        // generous timeout as this is a generic test; typically should be faster
+        int testTimeoutSeconds = 150;
+
+        testReadMetadataWithRelationsConcurrentModifications(readIterations, testTimeoutSeconds);
+    }
+
+    protected void testReadMetadataWithRelationsConcurrentModifications(int readIterations, int testTimeoutSeconds)
+            throws Exception
+    {
+        Stopwatch testWatch = Stopwatch.createStarted();
+
+        int readerTasksCount = 6
+                + (hasBehavior(SUPPORTS_CREATE_VIEW) ? 1 : 0)
+                + (hasBehavior(SUPPORTS_CREATE_MATERIALIZED_VIEW) ? 1 : 0);
+        AtomicInteger incompleteReadTasks = new AtomicInteger(readerTasksCount);
+        List<Callable<Void>> readerTasks = new ArrayList<>();
+        readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SHOW TABLES"));
+        readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SELECT * FROM information_schema.tables WHERE table_schema = CURRENT_SCHEMA"));
+        readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SELECT * FROM information_schema.columns WHERE table_schema = CURRENT_SCHEMA"));
+        readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SELECT * FROM system.jdbc.tables WHERE table_cat = CURRENT_CATALOG AND table_schem = CURRENT_SCHEMA"));
+        readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SELECT * FROM system.jdbc.columns WHERE table_cat = CURRENT_CATALOG AND table_schem = CURRENT_SCHEMA"));
+        readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SELECT * FROM system.metadata.table_comments WHERE catalog_name = CURRENT_CATALOG AND schema_name = CURRENT_SCHEMA"));
+        if (hasBehavior(SUPPORTS_CREATE_VIEW)) {
+            readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SELECT * FROM information_schema.views WHERE table_schema = CURRENT_SCHEMA"));
+        }
+        if (hasBehavior(SUPPORTS_CREATE_MATERIALIZED_VIEW)) {
+            readerTasks.add(queryRepeatedly(readIterations, incompleteReadTasks, "SELECT * FROM system.metadata.materialized_views WHERE catalog_name = CURRENT_CATALOG AND schema_name = CURRENT_SCHEMA"));
+        }
+        assertEquals(readerTasks.size(), readerTasksCount);
+
+        int writeTasksCount = 1
+                + (hasBehavior(SUPPORTS_CREATE_VIEW) ? 1 : 0)
+                + (hasBehavior(SUPPORTS_CREATE_MATERIALIZED_VIEW) ? 1 : 0);
+        writeTasksCount = 2 * writeTasksCount; // writes are scheduled twice
+        CountDownLatch writeTasksInitialized = new CountDownLatch(writeTasksCount);
+        Runnable writeInitialized = writeTasksInitialized::countDown;
+        Supplier<Boolean> done = () -> incompleteReadTasks.get() == 0;
+        List<Callable<Void>> writeTasks = new ArrayList<>();
+        writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_table", "CREATE TABLE %s(a integer)", "DROP TABLE %s"));
+        if (hasBehavior(SUPPORTS_CREATE_VIEW)) {
+            writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_view", "CREATE VIEW %s AS SELECT 1 a", "DROP VIEW %s"));
+        }
+        if (hasBehavior(SUPPORTS_CREATE_MATERIALIZED_VIEW)) {
+            writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_mview", "CREATE MATERIALIZED VIEW %s AS SELECT 1 a", "DROP MATERIALIZED VIEW %s"));
+        }
+        assertEquals(writeTasks.size() * 2, writeTasksCount);
+
+        ExecutorService executor = newFixedThreadPool(readerTasksCount + writeTasksCount);
+        try {
+            CompletionService<Void> completionService = new ExecutorCompletionService<>(executor);
+            submitTasks(writeTasks, completionService);
+            submitTasks(writeTasks, completionService); // twice to increase chances of catching problems
+            if (!writeTasksInitialized.await(testTimeoutSeconds, SECONDS)) {
+                Future<Void> someFailure = completionService.poll();
+                if (someFailure != null) {
+                    someFailure.get(); // non-blocking
+                }
+                fail("Setup failed");
+            }
+            submitTasks(readerTasks, completionService);
+            for (int i = 0; i < readerTasksCount + writeTasksCount; i++) {
+                long remainingTimeSeconds = testTimeoutSeconds - testWatch.elapsed(SECONDS);
+                Future<Void> future = completionService.poll(remainingTimeSeconds, SECONDS);
+                verifyNotNull(future, "Task did not completed before timeout; completed tasks: %s, current poll timeout: %s s", i, remainingTimeSeconds);
+                future.get(); // non-blocking
+            }
+        }
+        finally {
+            executor.shutdownNow();
+        }
+        assertTrue(executor.awaitTermination(10, SECONDS));
+    }
+
+    /**
+     * Run {@code sql} query at least {@code minIterations} times and keep running until other tasks complete.
+     * {@code incompleteReadTasks} is used for orchestrating end of execution.
+     */
+    protected Callable<Void> queryRepeatedly(int minIterations, AtomicInteger incompleteReadTasks, @Language("SQL") String sql)
+    {
+        return new Callable<>()
+        {
+            @Override
+            public Void call()
+            {
+                boolean alwaysEmpty = true;
+                for (int i = 0; i < minIterations; i++) {
+                    MaterializedResult result = computeActual(sql);
+                    alwaysEmpty &= result.getRowCount() == 0;
+                }
+                if (alwaysEmpty) {
+                    fail(format("The results of [%s] are always empty after %s iterations, this may indicate test misconfiguration or broken connector behavior", sql, minIterations));
+                }
+                assertThat(incompleteReadTasks.decrementAndGet()).as("incompleteReadTasks").isGreaterThanOrEqualTo(0);
+                // Keep running so that faster test queries have same length of exposure in wall time
+                while (incompleteReadTasks.get() != 0) {
+                    computeActual(sql);
+                }
+                return null;
+            }
+
+            @Override
+            public String toString()
+            {
+                return format("Query(%s)", sql);
+            }
+        };
+    }
+
+    protected Callable<Void> createDropRepeatedly(Runnable initReady, Supplier<Boolean> done, String namePrefix, String createTemplate, String dropTemplate)
+    {
+        return new Callable<>()
+        {
+            @Override
+            public Void call()
+            {
+                int objectsToKeep = 3;
+                Deque<String> liveObjects = new ArrayDeque<>(objectsToKeep);
+                for (int i = 0; i < objectsToKeep; i++) {
+                    String name = namePrefix + "_" + randomTableSuffix();
+                    assertUpdate(format(createTemplate, name));
+                    liveObjects.addLast(name);
+                }
+                initReady.run();
+                while (!done.get()) {
+                    assertUpdate(format(dropTemplate, liveObjects.removeFirst()));
+                    String name = namePrefix + "_" + randomTableSuffix();
+                    assertUpdate(format(createTemplate, name));
+                    liveObjects.addLast(name);
+                }
+                while (!liveObjects.isEmpty()) {
+                    assertUpdate(format(dropTemplate, liveObjects.removeFirst()));
+                }
+                return null;
+            }
+
+            @Override
+            public String toString()
+            {
+                return format("Repeat (%s) and (%s)", createTemplate, dropTemplate);
+            }
+        };
+    }
+
+    protected <T> void submitTasks(List<Callable<T>> callables, CompletionService<T> completionService)
+    {
+        for (Callable<T> callable : callables) {
+            String taskDescription = callable.toString();
+            completionService.submit(new Callable<T>()
+            {
+                @Override
+                public T call()
+                        throws Exception
+                {
+                    try {
+                        return callable.call();
+                    }
+                    catch (Throwable e) {
+                        e.addSuppressed(new Exception("Task: " + taskDescription));
+                        throw e;
+                    }
+                }
+            });
+        }
+    }
+
     @Test
     public void testExplainAnalyze()
     {
@@ -1448,44 +1713,6 @@ public abstract class BaseConnectorTest
     }
 
     @Test
-    public void testRenameTableAcrossSchema()
-    {
-        if (!hasBehavior(SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS)) {
-            if (!hasBehavior(SUPPORTS_RENAME_TABLE)) {
-                throw new SkipException("Skipping since rename table is not supported at all");
-            }
-            assertQueryFails("ALTER TABLE nation RENAME TO other_schema.yyyy", "This connector does not support renaming tables across schemas");
-            return;
-        }
-
-        if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
-            throw new AssertionError("Cannot test ALTER TABLE RENAME across schemas without CREATE SCHEMA, the test needs to be implemented in a connector-specific way");
-        }
-
-        if (!hasBehavior(SUPPORTS_CREATE_TABLE)) {
-            throw new AssertionError("Cannot test ALTER TABLE RENAME across schemas without CREATE TABLE, the test needs to be implemented in a connector-specific way");
-        }
-
-        String tableName = "test_rename_old_" + randomTableSuffix();
-        assertUpdate("CREATE TABLE " + tableName + " AS SELECT 123 x", 1);
-
-        String schemaName = "test_schema_" + randomTableSuffix();
-        assertUpdate("CREATE SCHEMA " + schemaName);
-
-        String renamedTable = schemaName + ".test_rename_new_" + randomTableSuffix();
-        assertUpdate("ALTER TABLE " + tableName + " RENAME TO " + renamedTable);
-
-        assertFalse(getQueryRunner().tableExists(getSession(), tableName));
-        assertQuery("SELECT x FROM " + renamedTable, "VALUES 123");
-
-        assertUpdate("DROP TABLE " + renamedTable);
-        assertUpdate("DROP SCHEMA " + schemaName);
-
-        assertFalse(getQueryRunner().tableExists(getSession(), tableName));
-        assertFalse(getQueryRunner().tableExists(getSession(), renamedTable));
-    }
-
-    @Test
     public void testAddColumn()
     {
         if (!hasBehavior(SUPPORTS_ADD_COLUMN)) {
@@ -1493,11 +1720,10 @@ public abstract class BaseConnectorTest
             return;
         }
 
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
-
         String tableName;
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_column_", "AS SELECT VARCHAR 'first' x")) {
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_column_", tableDefinitionForAddColumn())) {
             tableName = table.getName();
+            assertUpdate("INSERT INTO " + table.getName() + " SELECT 'first'", 1);
             assertQueryFails("ALTER TABLE " + table.getName() + " ADD COLUMN x bigint", ".* Column 'x' already exists");
             assertQueryFails("ALTER TABLE " + table.getName() + " ADD COLUMN X bigint", ".* Column 'X' already exists");
             assertQueryFails("ALTER TABLE " + table.getName() + " ADD COLUMN q bad_type", ".* Unknown type 'bad_type' for column 'q'");
@@ -1526,6 +1752,37 @@ public abstract class BaseConnectorTest
         assertUpdate("ALTER TABLE IF EXISTS " + tableName + " ADD COLUMN x bigint");
         assertUpdate("ALTER TABLE IF EXISTS " + tableName + " ADD COLUMN IF NOT EXISTS x bigint");
         assertFalse(getQueryRunner().tableExists(getSession(), tableName));
+    }
+
+    /**
+     * The table must have one column 'x' of varchar type.
+     */
+    protected String tableDefinitionForAddColumn()
+    {
+        return "(x VARCHAR)";
+    }
+
+    @Test
+    public void testAddColumnWithComment()
+    {
+        if (!hasBehavior(SUPPORTS_ADD_COLUMN)) {
+            // Covered by testAddColumn
+            return;
+        }
+        if (!hasBehavior(SUPPORTS_ADD_COLUMN_WITH_COMMENT)) {
+            assertQueryFails("ALTER TABLE nation ADD COLUMN test_add_col_desc bigint COMMENT 'test column comment'", "This connector does not support adding columns with comments");
+            return;
+        }
+
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_col_desc_", "(a_varchar varchar)")) {
+            String tableName = table.getName();
+
+            assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN b_varchar varchar COMMENT 'test new column comment'");
+            assertThat(getColumnComment(tableName, "b_varchar")).isEqualTo("test new column comment");
+
+            assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN empty_comment varchar COMMENT ''");
+            assertEquals(getColumnComment(tableName, "empty_comment"), "");
+        }
     }
 
     @Test
@@ -1606,6 +1863,7 @@ public abstract class BaseConnectorTest
         assertUpdate("CREATE TABLE " + tableName + " (a bigint, b double, c varchar(50))");
         assertTrue(getQueryRunner().tableExists(getSession(), tableName));
         assertTableColumnNames(tableName, "a", "b", "c");
+        assertNull(getTableComment(getSession().getCatalog().orElseThrow(), getSession().getSchema().orElseThrow(), tableName));
 
         assertUpdate("DROP TABLE " + tableName);
         assertFalse(getQueryRunner().tableExists(getSession(), tableName));
@@ -1645,6 +1903,59 @@ public abstract class BaseConnectorTest
     }
 
     @Test
+    public void testCreateTableWithTableComment()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+
+        String tableName = "test_create_" + randomTableSuffix();
+
+        if (!hasBehavior(SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT)) {
+            assertQueryFails("CREATE TABLE " + tableName + " (a bigint) COMMENT 'test comment'", "This connector does not support creating tables with table comment");
+            return;
+        }
+
+        assertUpdate("CREATE TABLE " + tableName + " (a bigint) COMMENT 'test comment'");
+        assertEquals(getTableComment(getSession().getCatalog().orElseThrow(), getSession().getSchema().orElseThrow(), tableName), "test comment");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testCreateTableWithColumnComment()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+
+        String tableName = "test_create_" + randomTableSuffix();
+
+        if (!hasBehavior(SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT)) {
+            assertQueryFails("CREATE TABLE " + tableName + " (a bigint COMMENT 'test comment')", "This connector does not support creating tables with column comment");
+            return;
+        }
+
+        assertUpdate("CREATE TABLE " + tableName + " (a bigint COMMENT 'test comment')");
+        assertEquals(getColumnComment(tableName, "a"), "test comment");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testCreateTableSchemaNotFound()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+
+        String schemaName = "test_schema_" + randomTableSuffix();
+        String tableName = "test_create_no_schema_" + randomTableSuffix();
+        try {
+            assertQueryFails(
+                    format("CREATE TABLE %s.%s (a bigint)", schemaName, tableName),
+                    format("Schema %s not found", schemaName));
+        }
+        finally {
+            assertUpdate(format("DROP TABLE IF EXISTS %s.%s", schemaName, tableName));
+        }
+    }
+
+    @Test
     public void testCreateTableAsSelect()
     {
         String tableName = "test_ctas" + randomTableSuffix();
@@ -1654,6 +1965,7 @@ public abstract class BaseConnectorTest
         }
         assertUpdate("CREATE TABLE IF NOT EXISTS " + tableName + " AS SELECT name, regionkey FROM nation", "SELECT count(*) FROM nation");
         assertTableColumnNames(tableName, "name", "regionkey");
+        assertNull(getTableComment(getSession().getCatalog().orElseThrow(), getSession().getSchema().orElseThrow(), tableName));
         assertUpdate("DROP TABLE " + tableName);
 
         // Some connectors support CREATE TABLE AS but not the ordinary CREATE TABLE. Let's test CTAS IF NOT EXISTS with a table that is guaranteed to exist.
@@ -1713,6 +2025,41 @@ public abstract class BaseConnectorTest
         assertExplainAnalyze("EXPLAIN ANALYZE CREATE TABLE " + tableName + " AS SELECT mktsegment FROM customer");
         assertQuery("SELECT * from " + tableName, "SELECT mktsegment FROM customer");
         assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testCreateTableAsSelectWithTableComment()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
+
+        String tableName = "test_ctas_" + randomTableSuffix();
+
+        if (!hasBehavior(SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT)) {
+            assertQueryFails("CREATE TABLE " + tableName + " COMMENT 'test comment' AS SELECT name FROM nation", "This connector does not support creating tables with table comment");
+            return;
+        }
+
+        assertUpdate("CREATE TABLE " + tableName + " COMMENT 'test comment' AS SELECT name FROM nation", 25);
+        assertEquals(getTableComment(getSession().getCatalog().orElseThrow(), getSession().getSchema().orElseThrow(), tableName), "test comment");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testCreateTableAsSelectSchemaNotFound()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
+
+        String schemaName = "test_schema_" + randomTableSuffix();
+        String tableName = "test_ctas_no_schema_" + randomTableSuffix();
+        try {
+            assertQueryFails(
+                    format("CREATE TABLE %s.%s AS SELECT name FROM nation", schemaName, tableName),
+                    format("Schema %s not found", schemaName));
+        }
+        finally {
+            assertUpdate(format("DROP TABLE IF EXISTS %s.%s", schemaName, tableName));
+        }
     }
 
     @Test
@@ -1813,6 +2160,63 @@ public abstract class BaseConnectorTest
     }
 
     @Test
+    public void testRenameTableAcrossSchema()
+    {
+        if (!hasBehavior(SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS)) {
+            if (!hasBehavior(SUPPORTS_RENAME_TABLE)) {
+                throw new SkipException("Skipping since rename table is not supported at all");
+            }
+            assertQueryFails("ALTER TABLE nation RENAME TO other_schema.yyyy", "This connector does not support renaming tables across schemas");
+            return;
+        }
+
+        if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
+            throw new AssertionError("Cannot test ALTER TABLE RENAME across schemas without CREATE SCHEMA, the test needs to be implemented in a connector-specific way");
+        }
+
+        if (!hasBehavior(SUPPORTS_CREATE_TABLE)) {
+            throw new AssertionError("Cannot test ALTER TABLE RENAME across schemas without CREATE TABLE, the test needs to be implemented in a connector-specific way");
+        }
+
+        String tableName = "test_rename_old_" + randomTableSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " AS SELECT 123 x", 1);
+
+        String schemaName = "test_schema_" + randomTableSuffix();
+        assertUpdate("CREATE SCHEMA " + schemaName);
+
+        String renamedTable = "test_rename_new_" + randomTableSuffix();
+        assertUpdate("ALTER TABLE " + tableName + " RENAME TO " + schemaName + "." + renamedTable);
+
+        assertFalse(getQueryRunner().tableExists(getSession(), tableName));
+        assertQuery("SELECT x FROM " + schemaName + "." + renamedTable, "VALUES 123");
+
+        assertUpdate("DROP TABLE " + schemaName + "." + renamedTable);
+        assertUpdate("DROP SCHEMA " + schemaName);
+
+        assertFalse(getQueryRunner().tableExists(getSession(), tableName));
+        assertFalse(getQueryRunner().tableExists(Session.builder(getSession()).setSchema(schemaName).build(), renamedTable));
+    }
+
+    @Test
+    public void testRenameTableToUnqualifiedPreservesSchema()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_SCHEMA) && hasBehavior(SUPPORTS_CREATE_TABLE) && hasBehavior(SUPPORTS_RENAME_TABLE));
+
+        String sourceSchemaName = "test_source_schema_" + randomTableSuffix();
+        assertUpdate(createSchemaSql(sourceSchemaName));
+
+        String tableName = "test_rename_unqualified_name_" + randomTableSuffix();
+        assertUpdate("CREATE TABLE " + sourceSchemaName + "." + tableName + " AS SELECT 123 x", 1);
+
+        String renamedTable = "test_rename_unqualified_name_new_" + randomTableSuffix();
+        assertUpdate("ALTER TABLE " + sourceSchemaName + "." + tableName + " RENAME TO " + renamedTable);
+        assertQuery("SELECT x FROM " + sourceSchemaName + "." + renamedTable, "VALUES 123");
+
+        assertUpdate("DROP TABLE " + sourceSchemaName + "." + renamedTable);
+        assertUpdate("DROP SCHEMA " + sourceSchemaName);
+    }
+
+    @Test
     public void testCommentTable()
     {
         if (!hasBehavior(SUPPORTS_COMMENT_ON_TABLE)) {
@@ -1826,7 +2230,7 @@ public abstract class BaseConnectorTest
             // comment set
             assertUpdate("COMMENT ON TABLE " + table.getName() + " IS 'new comment'");
             assertThat((String) computeActual("SHOW CREATE TABLE " + table.getName()).getOnlyValue()).contains("COMMENT 'new comment'");
-            assertThat(getTableComment(table.getName())).isEqualTo("new comment");
+            assertThat(getTableComment(catalogName, schemaName, table.getName())).isEqualTo("new comment");
             assertThat(query(
                     "SELECT table_name, comment FROM system.metadata.table_comments " +
                             "WHERE catalog_name = '" + catalogName + "' AND " +
@@ -1836,39 +2240,34 @@ public abstract class BaseConnectorTest
 
             // comment updated
             assertUpdate("COMMENT ON TABLE " + table.getName() + " IS 'updated comment'");
-            assertThat(getTableComment(table.getName())).isEqualTo("updated comment");
+            assertThat(getTableComment(catalogName, schemaName, table.getName())).isEqualTo("updated comment");
 
             // comment set to empty or deleted
             assertUpdate("COMMENT ON TABLE " + table.getName() + " IS ''");
-            assertThat(getTableComment(table.getName())).isIn("", null); // Some storages do not preserve empty comment
+            assertThat(getTableComment(catalogName, schemaName, table.getName())).isIn("", null); // Some storages do not preserve empty comment
 
             // comment deleted
             assertUpdate("COMMENT ON TABLE " + table.getName() + " IS 'a comment'");
-            assertThat(getTableComment(table.getName())).isEqualTo("a comment");
+            assertThat(getTableComment(catalogName, schemaName, table.getName())).isEqualTo("a comment");
             assertUpdate("COMMENT ON TABLE " + table.getName() + " IS NULL");
-            assertThat(getTableComment(table.getName())).isEqualTo(null);
+            assertThat(getTableComment(catalogName, schemaName, table.getName())).isEqualTo(null);
         }
 
         String tableName = "test_comment_" + randomTableSuffix();
         try {
             // comment set when creating a table
             assertUpdate("CREATE TABLE " + tableName + "(key integer) COMMENT 'new table comment'");
-            assertThat(getTableComment(tableName)).isEqualTo("new table comment");
+            assertThat(getTableComment(catalogName, schemaName, tableName)).isEqualTo("new table comment");
         }
         finally {
             assertUpdate("DROP TABLE IF EXISTS " + tableName);
         }
     }
 
-    private String getTableComment(String tableName)
+    private String getTableComment(String catalogName, String schemaName, String tableName)
     {
-        // TODO use information_schema.tables.table_comment
-        String result = (String) computeActual("SHOW CREATE TABLE " + tableName).getOnlyValue();
-        Matcher matcher = Pattern.compile("COMMENT '([^']*)'").matcher(result);
-        if (matcher.find()) {
-            return matcher.group(1);
-        }
-        return null;
+        String sql = format("SELECT comment FROM system.metadata.table_comments WHERE catalog_name = '%s' AND schema_name = '%s' AND table_name = '%s'", catalogName, schemaName, tableName);
+        return (String) computeActual(sql).getOnlyValue();
     }
 
     @Test
@@ -1906,7 +2305,7 @@ public abstract class BaseConnectorTest
 //        assertUpdate("DROP TABLE " + tableName);
     }
 
-    private String getColumnComment(String tableName, String columnName)
+    protected String getColumnComment(String tableName, String columnName)
     {
         MaterializedResult materializedResult = computeActual(format(
                 "SELECT comment FROM information_schema.columns WHERE table_schema = '%s' AND table_name = '%s' AND column_name = '%s'",
@@ -2071,6 +2470,34 @@ public abstract class BaseConnectorTest
         throw new UnsupportedOperationException("This method should be overridden");
     }
 
+    protected boolean isReportingWrittenBytesSupported(Session session)
+    {
+        CatalogName catalogName = session.getCatalog()
+                .map(CatalogName::new)
+                .orElseThrow();
+        Metadata metadata = getQueryRunner().getMetadata();
+        metadata.getCatalogHandle(session, catalogName.getCatalogName());
+        QualifiedObjectName fullTableName = new QualifiedObjectName(catalogName.getCatalogName(), "any", "any");
+        return getQueryRunner().getMetadata().supportsReportingWrittenBytes(session, fullTableName, ImmutableMap.of());
+    }
+
+    @Test
+    public void isReportingWrittenBytesSupported()
+    {
+        transaction(getQueryRunner().getTransactionManager(), getQueryRunner().getAccessControl())
+                .singleStatement()
+                .execute(getSession(), (Consumer<Session>) session -> skipTestUnless(isReportingWrittenBytesSupported(session)));
+
+        @Language("SQL")
+        String query = "CREATE TABLE temp AS SELECT * FROM tpch.tiny.nation";
+
+        assertQueryStats(
+                getSession(),
+                query,
+                queryStats -> assertThat(queryStats.getPhysicalWrittenDataSize().toBytes()).isGreaterThan(0L),
+                results -> {});
+    }
+
     @Test
     public void testInsertIntoNotNullColumn()
     {
@@ -2105,9 +2532,25 @@ public abstract class BaseConnectorTest
     }
 
     @Test
+    public void testInsertInTransaction()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_INSERT));
+        skipTestUnless(hasBehavior(SUPPORTS_MULTI_STATEMENT_WRITES)); // covered by testWriteNotAllowedInTransaction
+
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_tx_insert",
+                "(a bigint)")) {
+            String tableName = table.getName();
+            inTransaction(session -> assertUpdate(session, "INSERT INTO " + tableName + " VALUES 42", 1));
+            assertQuery("TABLE " + tableName, "VALUES 42");
+        }
+    }
+
+    @Test
     public void testDelete()
     {
-        skipTestUnlessSupportsDeletes();
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
         // delete successive parts of the table
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_", "AS SELECT * FROM orders")) {
@@ -2149,9 +2592,20 @@ public abstract class BaseConnectorTest
     }
 
     @Test
+    public void testDeleteWithLike()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
+
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_with_like_", "AS SELECT * FROM nation")) {
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE name LIKE '%a%'", "VALUES 0");
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE name LIKE '%A%'", "SELECT count(*) FROM nation WHERE name LIKE '%A%'");
+        }
+    }
+
+    @Test
     public void testDeleteWithComplexPredicate()
     {
-        skipTestUnlessSupportsDeletes();
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
         // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_complex_", "AS SELECT * FROM orders")) {
@@ -2169,7 +2623,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testDeleteWithSubquery()
     {
-        skipTestUnlessSupportsDeletes();
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
         // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_subquery", "AS SELECT * FROM nation")) {
@@ -2193,7 +2647,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testExplainAnalyzeWithDeleteWithSubquery()
     {
-        skipTestUnlessSupportsDeletes();
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
         String tableName = "test_delete_" + randomTableSuffix();
 
@@ -2207,7 +2661,7 @@ public abstract class BaseConnectorTest
     @Test
     public void testDeleteWithSemiJoin()
     {
-        skipTestUnlessSupportsDeletes();
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
         // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_semijoin", "AS SELECT * FROM nation")) {
@@ -2242,22 +2696,11 @@ public abstract class BaseConnectorTest
     @Test
     public void testDeleteWithVarcharPredicate()
     {
-        skipTestUnlessSupportsDeletes();
+        skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
         try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_with_varchar_predicate_", "AS SELECT * FROM orders")) {
             assertUpdate("DELETE FROM " + table.getName() + " WHERE orderstatus = 'O'", "SELECT count(*) FROM orders WHERE orderstatus = 'O'");
             assertQuery("SELECT * FROM " + table.getName(), "SELECT * FROM orders WHERE orderstatus <> 'O'");
-        }
-    }
-
-    protected void skipTestUnlessSupportsDeletes()
-    {
-        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_supports_delete", "(col varchar(1))")) {
-            if (!hasBehavior(SUPPORTS_DELETE)) {
-                assertQueryFails("DELETE FROM " + table.getName(), "This connector does not support deletes");
-                throw new SkipException("This connector does not support deletes");
-            }
         }
     }
 
@@ -2371,7 +2814,7 @@ public abstract class BaseConnectorTest
                                 verifyConcurrentUpdateFailurePermissible(trinoException);
                             }
                             catch (Throwable verifyFailure) {
-                                if (trinoException != e && verifyFailure != e) {
+                                if (verifyFailure != e) {
                                     verifyFailure.addSuppressed(e);
                                 }
                                 throw verifyFailure;
@@ -2399,6 +2842,204 @@ public abstract class BaseConnectorTest
     {
         // By default, do not expect UPDATE to fail in case of concurrent updates
         throw new AssertionError("Unexpected concurrent update failure", e);
+    }
+
+    // Repeat test with invocationCount for better test coverage, since the tested aspect is inherently non-deterministic.
+    @Test(timeOut = 60_000, invocationCount = 4)
+    public void testInsertRowConcurrently()
+            throws Exception
+    {
+        if (!hasBehavior(SUPPORTS_INSERT)) {
+            // Covered by testInsert
+            return;
+        }
+
+        int threads = 4;
+        CyclicBarrier barrier = new CyclicBarrier(threads);
+        ExecutorService executor = newFixedThreadPool(threads);
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_insert", "(col integer)")) {
+            String tableName = table.getName();
+
+            List<Future<OptionalInt>> futures = IntStream.range(0, threads)
+                    .mapToObj(threadNumber -> executor.submit(() -> {
+                        barrier.await(10, SECONDS);
+                        try {
+                            getQueryRunner().execute("INSERT INTO " + tableName + " VALUES (" + threadNumber + ")");
+                            return OptionalInt.of(threadNumber);
+                        }
+                        catch (Exception e) {
+                            RuntimeException trinoException = getTrinoExceptionCause(e);
+                            try {
+                                verifyConcurrentInsertFailurePermissible(trinoException);
+                            }
+                            catch (Throwable verifyFailure) {
+                                if (verifyFailure != e) {
+                                    verifyFailure.addSuppressed(e);
+                                }
+                                throw verifyFailure;
+                            }
+                            return OptionalInt.empty();
+                        }
+                    }))
+                    .collect(toImmutableList());
+
+            List<Integer> values = futures.stream()
+                    .map(future -> tryGetFutureValue(future, 10, SECONDS).orElseThrow(() -> new RuntimeException("Wait timed out")))
+                    .filter(OptionalInt::isPresent)
+                    .map(OptionalInt::getAsInt)
+                    .collect(toImmutableList());
+
+            if (values.isEmpty()) {
+                assertQueryReturnsEmptyResult("TABLE " + tableName);
+            }
+            else {
+                // Cast to integer because some connectors (e.g. Oracle) map integer to different types that skippingTypesCheck can't resolve the mismatch.
+                assertThat(query("SELECT CAST(col AS INTEGER) FROM " + tableName))
+                        .matches(values.stream()
+                                .map(value -> format("(%s)", value))
+                                .collect(joining(",", "VALUES ", "")));
+            }
+        }
+        finally {
+            executor.shutdownNow();
+            executor.awaitTermination(10, SECONDS);
+        }
+    }
+
+    protected void verifyConcurrentInsertFailurePermissible(Exception e)
+    {
+        // By default, do not expect INSERT to fail in case of concurrent inserts
+        throw new AssertionError("Unexpected concurrent insert failure", e);
+    }
+
+    // Repeat test with invocationCount for better test coverage, since the tested aspect is inherently non-deterministic.
+    @Test(timeOut = 60_000, invocationCount = 4)
+    public void testAddColumnConcurrently()
+            throws Exception
+    {
+        if (!hasBehavior(SUPPORTS_ADD_COLUMN)) {
+            // Covered by testAddColumn
+            return;
+        }
+
+        int threads = 4;
+        CyclicBarrier barrier = new CyclicBarrier(threads);
+        ExecutorService executor = newFixedThreadPool(threads);
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_column", "(col integer)")) {
+            String tableName = table.getName();
+
+            List<Future<Optional<String>>> futures = IntStream.range(0, threads)
+                    .mapToObj(threadNumber -> executor.submit(() -> {
+                        barrier.await(30, SECONDS);
+                        try {
+                            String columnName = "col" + threadNumber;
+                            getQueryRunner().execute("ALTER TABLE " + tableName + " ADD COLUMN " + columnName + " integer");
+                            return Optional.of(columnName);
+                        }
+                        catch (Exception e) {
+                            RuntimeException trinoException = getTrinoExceptionCause(e);
+                            try {
+                                verifyConcurrentAddColumnFailurePermissible(trinoException);
+                            }
+                            catch (Throwable verifyFailure) {
+                                if (verifyFailure != e) {
+                                    verifyFailure.addSuppressed(e);
+                                }
+                                throw verifyFailure;
+                            }
+                            return Optional.<String>empty();
+                        }
+                    }))
+                    .collect(toImmutableList());
+
+            List<String> addedColumns = futures.stream()
+                    .map(future -> tryGetFutureValue(future, 30, SECONDS).orElseThrow(() -> new RuntimeException("Wait timed out")))
+                    .filter(Optional::isPresent)
+                    .map(Optional::get)
+                    .collect(toImmutableList());
+
+            assertThat(query("DESCRIBE " + tableName))
+                    .projected(0)
+                    .skippingTypesCheck()
+                    .matches(Stream.concat(Stream.of("col"), addedColumns.stream())
+                            .map(value -> format("'%s'", value))
+                            .collect(joining(",", "VALUES ", "")));
+        }
+        finally {
+            executor.shutdownNow();
+            executor.awaitTermination(30, SECONDS);
+        }
+    }
+
+    protected void verifyConcurrentAddColumnFailurePermissible(Exception e)
+    {
+        // By default, do not expect ALTER TABLE ADD COLUMN to fail in case of concurrent inserts
+        throw new AssertionError("Unexpected concurrent add column failure", e);
+    }
+
+    @Test
+    public void testUpdateWithPredicates()
+    {
+        if (!hasBehavior(SUPPORTS_UPDATE)) {
+            // Note this change is a no-op, if actually run
+            assertQueryFails("UPDATE nation SET nationkey = nationkey + regionkey WHERE regionkey < 1", "This connector does not support updates");
+            return;
+        }
+
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_update_with_predicates", "(a INT, b INT, c INT)")) {
+            String tableName = table.getName();
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, 2, 3), (11, 12, 13), (21, 22, 23)", 3);
+            assertUpdate("UPDATE " + tableName + " SET a = a - 1 WHERE c = 3", 1);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (0, 2, 3), (11, 12, 13), (21, 22, 23)");
+
+            assertUpdate("UPDATE " + tableName + " SET c = c + 1 WHERE a = 11", 1);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (0, 2, 3), (11, 12, 14), (21, 22, 23)");
+
+            assertUpdate("UPDATE " + tableName + " SET b = b * 2 WHERE b = 22", 1);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (0, 2, 3), (11, 12, 14), (21, 44, 23)");
+        }
+
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_update_with_predicates_on_row_types", "(int_t INT, row_t ROW(f1 INT, f2 INT))")) {
+            String tableName = table.getName();
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, ROW(2, 3)), (11, ROW(12, 13)), (21, ROW(22, 23))", 3);
+            assertUpdate("UPDATE " + tableName + " SET int_t = int_t - 1 WHERE row_t.f2 = 3", 1);
+            assertQuery("SELECT int_t, row_t.f1, row_t.f2 FROM " + tableName, "VALUES (0, 2, 3), (11, 12, 13), (21, 22, 23)");
+
+            assertUpdate("UPDATE " + tableName + " SET row_t = ROW(row_t.f1, row_t.f2 + 1) WHERE int_t = 11", 1);
+            assertQuery("SELECT int_t, row_t.f1, row_t.f2 FROM " + tableName, "VALUES (0, 2, 3), (11, 12, 14), (21, 22, 23)");
+
+            assertUpdate("UPDATE " + tableName + " SET row_t = ROW(row_t.f1 * 2, row_t.f2) WHERE row_t.f1 = 22", 1);
+            assertQuery("SELECT int_t, row_t.f1, row_t.f2 FROM " + tableName, "VALUES (0, 2, 3), (11, 12, 14), (21, 44, 23)");
+        }
+    }
+
+    @Test
+    public void testUpdateAllValues()
+    {
+        if (!hasBehavior(SUPPORTS_UPDATE)) {
+            // Note this change is a no-op, if actually run
+            assertQueryFails("UPDATE nation SET nationkey = nationkey + regionkey WHERE regionkey < 1", "This connector does not support updates");
+            return;
+        }
+
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_update_all_columns", "(a INT, b INT, c INT)")) {
+            String tableName = table.getName();
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, 2, 3), (11, 12, 13), (21, 22, 23)", 3);
+            assertUpdate("UPDATE " + tableName + " SET a = a + 1, b = b - 1, c = c * 2", 3);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (2, 1, 6), (12, 11, 26), (22, 21, 46)");
+        }
+    }
+
+    @Test
+    public void testDropTable()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
+        String tableName = "test_drop_table_" + randomTableSuffix();
+        assertUpdate("CREATE TABLE " + tableName + "(col bigint)");
+        assertTrue(getQueryRunner().tableExists(getSession(), tableName));
+
+        assertUpdate("DROP TABLE " + tableName);
+        assertFalse(getQueryRunner().tableExists(getSession(), tableName));
     }
 
     @Test
@@ -2668,11 +3309,8 @@ public abstract class BaseConnectorTest
             assertUpdate(createTable, 3);
         };
         if (dataMappingTestSetup.isUnsupportedType()) {
-            String typeNameBase = trinoTypeName.replaceFirst("\\(.*", "");
-            String expectedMessagePart = format("(%1$s.*not (yet )?supported)|((?i)unsupported.*%1$s)|((?i)not supported.*%1$s)", Pattern.quote(typeNameBase));
             assertThatThrownBy(setup::run)
-                    .hasMessageFindingMatch(expectedMessagePart)
-                    .satisfies(e -> assertThat(getTrinoExceptionCause(e)).hasMessageFindingMatch(expectedMessagePart));
+                    .satisfies(exception -> verifyUnsupportedTypeException(exception, trinoTypeName));
             return;
         }
         setup.run();
@@ -2725,8 +3363,11 @@ public abstract class BaseConnectorTest
                 .add(new DataMappingTestSetup("date", "DATE '1582-10-05'", "DATE '1582-10-14'")) // during julian->gregorian switch
                 .add(new DataMappingTestSetup("date", "DATE '2020-02-12'", "DATE '9999-12-31'"))
                 .add(new DataMappingTestSetup("time", "TIME '15:03:00'", "TIME '23:59:59.999'"))
+                .add(new DataMappingTestSetup("time(6)", "TIME '15:03:00'", "TIME '23:59:59.999999'"))
                 .add(new DataMappingTestSetup("timestamp", "TIMESTAMP '2020-02-12 15:03:00'", "TIMESTAMP '2199-12-31 23:59:59.999'"))
+                .add(new DataMappingTestSetup("timestamp(6)", "TIMESTAMP '2020-02-12 15:03:00'", "TIMESTAMP '2199-12-31 23:59:59.999999'"))
                 .add(new DataMappingTestSetup("timestamp(3) with time zone", "TIMESTAMP '2020-02-12 15:03:00 +01:00'", "TIMESTAMP '9999-12-31 23:59:59.999 +12:00'"))
+                .add(new DataMappingTestSetup("timestamp(6) with time zone", "TIMESTAMP '2020-02-12 15:03:00 +01:00'", "TIMESTAMP '9999-12-31 23:59:59.999999 +12:00'"))
                 .add(new DataMappingTestSetup("char(3)", "'ab'", "'zzz'"))
                 .add(new DataMappingTestSetup("varchar(3)", "'de'", "'zzz'"))
                 .add(new DataMappingTestSetup("varchar", "'łąka for the win'", "'ŻŻŻŻŻŻŻŻŻŻ'"))
@@ -2769,6 +3410,69 @@ public abstract class BaseConnectorTest
                 .add(new DataMappingTestSetup("char(1)", "'B'", "'a'"))
                 .add(new DataMappingTestSetup("varchar(1)", "'B'", "'a'"))
                 .build();
+    }
+
+    /**
+     * A regression test for row (struct) dereference pushdown edge case, with duplicate expressions.
+     * See https://github.com/trinodb/trino/issues/11559 and https://github.com/trinodb/trino/issues/11560.
+     */
+    @Test
+    public void testPotentialDuplicateDereferencePushdown()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA));
+
+        String tableName = "test_dup_deref_" + randomTableSuffix();
+        String createTable = "CREATE TABLE " + tableName + " AS SELECT CAST(ROW('abc', 1) AS row(a varchar, b bigint)) r";
+        if (!hasBehavior(SUPPORTS_ROW_TYPE)) {
+            try {
+                assertUpdate(createTable);
+            }
+            catch (Exception expected) {
+                verifyUnsupportedTypeException(expected, "row(a varchar, b bigint)");
+                return;
+            }
+            assertUpdate("DROP TABLE " + tableName);
+            fail("Expected create table failure");
+        }
+
+        assertUpdate(createTable, 1);
+        try {
+            assertThat(query("SELECT r, r.b + 2 FROM " + tableName))
+                    .matches("SELECT CAST(ROW('abc', 1) AS ROW(a varchar, b bigint)), BIGINT '3'");
+
+            assertThat(query("SELECT r[1], r[2], r.b + 2 FROM " + tableName))
+                    .matches("VALUES (VARCHAR 'abc', BIGINT '1', BIGINT '3')");
+
+            assertThat(query("SELECT r[2], r.b + 2 FROM " + tableName))
+                    .matches("VALUES (BIGINT '1', BIGINT '3')");
+
+            assertThat(query("SELECT r.b, r.b + 2 FROM " + tableName))
+                    .matches("VALUES (BIGINT '1', BIGINT '3')");
+
+            assertThat(query("SELECT r, r.a LIKE '%c' FROM " + tableName))
+                    .matches("SELECT CAST(ROW('abc', 1) AS ROW(a varchar, b bigint)), true");
+
+            assertThat(query("SELECT r[1], r[2], r.a LIKE '%c' FROM " + tableName))
+                    .matches("VALUES (VARCHAR 'abc', BIGINT '1', true)");
+
+            assertThat(query("SELECT r[1], r.a LIKE '%c' FROM " + tableName))
+                    .matches("VALUES (VARCHAR 'abc', true)");
+
+            assertThat(query("SELECT r.a, r.a LIKE '%c' FROM " + tableName))
+                    .matches("VALUES (VARCHAR 'abc', true)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
+    }
+
+    private void verifyUnsupportedTypeException(Throwable exception, String trinoTypeName)
+    {
+        String typeNameBase = trinoTypeName.replaceFirst("\\(.*", "");
+        String expectedMessagePart = format("(%1$s.*not (yet )?supported)|((?i)unsupported.*%1$s)|((?i)not supported.*%1$s)", Pattern.quote(typeNameBase));
+        assertThat(exception)
+                .hasMessageFindingMatch(expectedMessagePart)
+                .satisfies(e -> assertThat(getTrinoExceptionCause(e)).hasMessageFindingMatch(expectedMessagePart));
     }
 
     @Test(dataProvider = "testColumnNameDataProvider")
@@ -2815,8 +3519,9 @@ public abstract class BaseConnectorTest
                     .findAll()
                     .size();
             if (actualCount != expectedCount) {
-                Metadata metadata = getDistributedQueryRunner().getCoordinator().getMetadata();
-                String formattedPlan = textLogicalPlan(plan.getRoot(), plan.getTypes(), metadata, StatsAndCosts.empty(), session, 0, false);
+                Metadata metadata = getDistributedQueryRunner().getMetadata();
+                FunctionManager functionManager = getDistributedQueryRunner().getFunctionManager();
+                String formattedPlan = textLogicalPlan(plan.getRoot(), plan.getTypes(), metadata, functionManager, StatsAndCosts.empty(), session, 0, false);
                 throw new AssertionError(format(
                         "Expected [\n%s\n] partial limit but found [\n%s\n] partial limit. Actual plan is [\n\n%s\n]",
                         expectedCount,
@@ -2824,6 +3529,11 @@ public abstract class BaseConnectorTest
                         formattedPlan));
             }
         };
+    }
+
+    protected String createSchemaSql(String schemaName)
+    {
+        return "CREATE SCHEMA " + schemaName;
     }
 
     protected static final class DataMappingTestSetup

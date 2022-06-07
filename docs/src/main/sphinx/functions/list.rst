@@ -162,6 +162,7 @@ F
 - :func:`format_datetime`
 - :func:`format_number`
 - :func:`from_base`
+- :func:`from_base32`
 - :func:`from_base64`
 - :func:`from_base64url`
 - :func:`from_big_endian_32`
@@ -228,11 +229,14 @@ J
 - :func:`json_array_contains`
 - :func:`json_array_get`
 - :func:`json_array_length`
+- :ref:`json_exists() <json_exists>`
 - :func:`json_extract`
 - :func:`json_extract_scalar`
 - :func:`json_format`
 - :func:`json_parse`
+- :ref:`json_query() <json_query>`
 - :func:`json_size`
+- :ref:`json_value() <json_value>`
 
 K
 -
@@ -467,6 +471,7 @@ T
 - :func:`timezone_hour`
 - :func:`timezone_minute`
 - :func:`to_base`
+- :func:`to_base32`
 - :func:`to_base64`
 - :func:`to_base64url`
 - :func:`to_big_endian_32`

@@ -70,12 +70,17 @@ public abstract class AbstractKuduConnectorTest
             case SUPPORTS_DELETE:
                 return true;
             case SUPPORTS_RENAME_SCHEMA:
+            case SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT:
             case SUPPORTS_COMMENT_ON_TABLE:
             case SUPPORTS_COMMENT_ON_COLUMN:
             case SUPPORTS_ARRAY:
             case SUPPORTS_NOT_NULL_CONSTRAINT:
             case SUPPORTS_TOPN_PUSHDOWN:
                 return false;
+
+            case SUPPORTS_ROW_TYPE:
+                return false;
+
             default:
                 return super.hasBehavior(connectorBehavior);
         }
@@ -128,15 +133,15 @@ public abstract class AbstractKuduConnectorTest
     {
         assertThat((String) computeActual("SHOW CREATE TABLE orders").getOnlyValue())
                 .matches("CREATE TABLE kudu\\.\\w+\\.orders \\Q(\n" +
-                        "   orderkey bigint WITH ( nullable = true ),\n" +
-                        "   custkey bigint WITH ( nullable = true ),\n" +
-                        "   orderstatus varchar WITH ( nullable = true ),\n" +
-                        "   totalprice double WITH ( nullable = true ),\n" +
-                        "   orderdate varchar WITH ( nullable = true ),\n" +
-                        "   orderpriority varchar WITH ( nullable = true ),\n" +
-                        "   clerk varchar WITH ( nullable = true ),\n" +
-                        "   shippriority integer WITH ( nullable = true ),\n" +
-                        "   comment varchar WITH ( nullable = true )\n" +
+                        "   orderkey bigint COMMENT '' WITH ( nullable = true ),\n" +
+                        "   custkey bigint COMMENT '' WITH ( nullable = true ),\n" +
+                        "   orderstatus varchar COMMENT '' WITH ( nullable = true ),\n" +
+                        "   totalprice double COMMENT '' WITH ( nullable = true ),\n" +
+                        "   orderdate varchar COMMENT '' WITH ( nullable = true ),\n" +
+                        "   orderpriority varchar COMMENT '' WITH ( nullable = true ),\n" +
+                        "   clerk varchar COMMENT '' WITH ( nullable = true ),\n" +
+                        "   shippriority integer COMMENT '' WITH ( nullable = true ),\n" +
+                        "   comment varchar COMMENT '' WITH ( nullable = true )\n" +
                         ")\n" +
                         "WITH (\n" +
                         "   number_of_replicas = 3,\n" +
@@ -271,12 +276,53 @@ public abstract class AbstractKuduConnectorTest
         throw new SkipException("TODO");
     }
 
+    @Override
+    public void testCreateTableWithColumnComment()
+    {
+        // TODO https://github.com/trinodb/trino/issues/12469 Support column comment when creating tables
+        String tableName = "test_create_" + randomTableSuffix();
+
+        assertQueryFails(
+                "CREATE TABLE " + tableName + "(" +
+                        "id INT WITH (primary_key=true)," +
+                        "a VARCHAR COMMENT 'test comment')" +
+                        "WITH (partition_by_hash_columns = ARRAY['id'], partition_by_hash_buckets = 2)",
+                "This connector does not support creating tables with column comment");
+
+        assertUpdate("DROP TABLE IF EXISTS " + tableName);
+    }
+
+    @Override
+    public void testDropTable()
+    {
+        assertThatThrownBy(super::testDropTable)
+                .hasMessage("Table partitioning must be specified using setRangePartitionColumns or addHashPartitions");
+        throw new SkipException("TODO Enable the test once Kudu connector can create tables with default partitions");
+    }
+
+    @Override
+    protected String tableDefinitionForAddColumn()
+    {
+        return "(x VARCHAR WITH (primary_key=true)) WITH (partition_by_hash_columns = ARRAY['x'], partition_by_hash_buckets = 2)";
+    }
+
     @Test
     @Override
-    public void testAddColumn()
+    public void testAddColumnWithComment()
     {
-        // TODO Support these test once kudu connector can create tables with default partitions
-        throw new SkipException("TODO");
+        String tableName = "test_add_column_with_comment" + randomTableSuffix();
+
+        assertUpdate("CREATE TABLE IF NOT EXISTS " + tableName + " (" +
+                "id INT WITH (primary_key=true), " +
+                "a_varchar VARCHAR" +
+                ") WITH (" +
+                " partition_by_hash_columns = ARRAY['id'], " +
+                " partition_by_hash_buckets = 2" +
+                ")");
+
+        assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN b_varchar varchar COMMENT 'test new column comment'");
+        assertThat(getColumnComment(tableName, "b_varchar")).isEqualTo("test new column comment");
+        assertUpdate("DROP TABLE " + tableName);
     }
 
     @Test
@@ -305,6 +351,20 @@ public abstract class AbstractKuduConnectorTest
 
     @Override
     public void testInsertNegativeDate()
+    {
+        // TODO Support these test once kudu connector can create tables with default partitions
+        throw new SkipException("TODO");
+    }
+
+    @Override
+    public void testInsertRowConcurrently()
+    {
+        // TODO Support these test once kudu connector can create tables with default partitions
+        throw new SkipException("TODO");
+    }
+
+    @Override
+    public void testAddColumnConcurrently()
     {
         // TODO Support these test once kudu connector can create tables with default partitions
         throw new SkipException("TODO");
@@ -358,6 +418,13 @@ public abstract class AbstractKuduConnectorTest
         throw new SkipException("TODO");
     }
 
+    @Override
+    public void testReadMetadataWithRelationsConcurrentModifications()
+    {
+        // TODO Support these test once kudu connector can create tables with default partitions
+        throw new SkipException("TODO");
+    }
+
     @Test
     @Override
     public void testCreateTableAsSelectNegativeDate()
@@ -406,7 +473,10 @@ public abstract class AbstractKuduConnectorTest
     {
         String typeName = dataMappingTestSetup.getTrinoTypeName();
         if (typeName.equals("time")
-                || typeName.equals("timestamp(3) with time zone")) {
+                || typeName.equals("time(6)")
+                || typeName.equals("timestamp(6)")
+                || typeName.equals("timestamp(3) with time zone")
+                || typeName.equals("timestamp(6) with time zone")) {
             return Optional.of(dataMappingTestSetup.asUnsupported());
         }
 

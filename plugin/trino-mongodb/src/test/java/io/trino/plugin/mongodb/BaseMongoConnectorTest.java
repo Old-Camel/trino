@@ -31,10 +31,12 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.Optional;
 
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -61,12 +63,9 @@ public abstract class BaseMongoConnectorTest
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         switch (connectorBehavior) {
-            case SUPPORTS_CREATE_SCHEMA:
+            case SUPPORTS_RENAME_SCHEMA:
             case SUPPORTS_NOT_NULL_CONSTRAINT:
-            case SUPPORTS_RENAME_TABLE:
             case SUPPORTS_RENAME_COLUMN:
-            case SUPPORTS_COMMENT_ON_TABLE:
-            case SUPPORTS_COMMENT_ON_COLUMN:
                 return false;
             default:
                 return super.hasBehavior(connectorBehavior);
@@ -102,6 +101,18 @@ public abstract class BaseMongoConnectorTest
         assertExplain(
                 "EXPLAIN SELECT name FROM nation ORDER BY nationkey DESC NULLS LAST LIMIT 5",
                 "TopNPartial\\[5 by \\(nationkey DESC");
+    }
+
+    @Override
+    protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
+    {
+        String typeName = dataMappingTestSetup.getTrinoTypeName();
+        if (typeName.equals("time(6)") ||
+                typeName.equals("timestamp(6)") ||
+                typeName.equals("timestamp(6) with time zone")) {
+            return Optional.of(dataMappingTestSetup.asUnsupported());
+        }
+        return Optional.of(dataMappingTestSetup);
     }
 
     @Test(dataProvider = "guessFieldTypesProvider")
@@ -151,7 +162,8 @@ public abstract class BaseMongoConnectorTest
                 ", DATE '1980-05-07' _date" +
                 ", TIMESTAMP '1980-05-07 11:22:33.456' _timestamp" +
                 ", ObjectId('ffffffffffffffffffffffff') _objectid" +
-                ", JSON '{\"name\":\"alice\"}' _json";
+                ", JSON '{\"name\":\"alice\"}' _json" +
+                ", cast(12.3 as decimal(30, 5)) _long_decimal";
 
         assertUpdate(query, 1);
 
@@ -166,6 +178,7 @@ public abstract class BaseMongoConnectorTest
         assertEquals(row.getField(5), LocalDate.of(1980, 5, 7));
         assertEquals(row.getField(6), LocalDateTime.of(1980, 5, 7, 11, 22, 33, 456_000_000));
         assertEquals(row.getField(8), "{\"name\":\"alice\"}");
+        assertEquals(row.getField(9), new BigDecimal("12.30000"));
         assertUpdate("DROP TABLE test_types_table");
 
         assertFalse(getQueryRunner().tableExists(getSession(), "test_types_table"));
@@ -461,6 +474,21 @@ public abstract class BaseMongoConnectorTest
     }
 
     @Test
+    public void testCaseInsensitiveRenameTable()
+    {
+        MongoCollection<Document> collection = client.getDatabase("testCase_RenameTable").getCollection("testInsensitive_RenameTable");
+        collection.insertOne(new Document(ImmutableMap.of("value", 1)));
+        assertQuery("SHOW TABLES IN testcase_renametable", "SELECT 'testinsensitive_renametable'");
+        assertQuery("SELECT value FROM testcase_renametable.testinsensitive_renametable", "SELECT 1");
+
+        assertUpdate("ALTER TABLE testcase_renametable.testinsensitive_renametable RENAME TO testcase_renametable.testinsensitive_renamed_table");
+
+        assertQuery("SHOW TABLES IN testcase_renametable", "SELECT 'testinsensitive_renamed_table'");
+        assertQuery("SELECT value FROM testcase_renametable.testinsensitive_renamed_table", "SELECT 1");
+        assertUpdate("DROP TABLE testcase_renametable.testinsensitive_renamed_table");
+    }
+
+    @Test
     public void testNonLowercaseViewName()
     {
         // Case insensitive schema name
@@ -499,11 +527,16 @@ public abstract class BaseMongoConnectorTest
     }
 
     @Test
-    public void testDropTable()
+    public void testBooleanPredicates()
     {
-        assertUpdate("CREATE TABLE test.drop_table(col bigint)");
-        assertUpdate("DROP TABLE test.drop_table");
-        assertQueryFails("SELECT * FROM test.drop_table", ".*Table 'mongodb.test.drop_table' does not exist");
+        assertUpdate("CREATE TABLE boolean_predicates(id integer, value boolean)");
+        assertUpdate("INSERT INTO boolean_predicates VALUES(1, true)", 1);
+        assertUpdate("INSERT INTO boolean_predicates VALUES(2, false)", 1);
+
+        assertQuery("SELECT id FROM boolean_predicates WHERE value = true", "VALUES 1");
+        assertQuery("SELECT id FROM boolean_predicates WHERE value = false", "VALUES 2");
+
+        assertUpdate("DROP TABLE boolean_predicates");
     }
 
     @Test
@@ -534,6 +567,13 @@ public abstract class BaseMongoConnectorTest
         // MongoDB doesn't support limit number greater than integer max
         assertThat(query("SELECT name FROM nation LIMIT 2147483647")).isFullyPushedDown();
         assertThat(query("SELECT name FROM nation LIMIT 2147483648")).isNotFullyPushedDown(LimitNode.class);
+    }
+
+    @Override
+    public void testAddColumnConcurrently()
+    {
+        // TODO: Enable after supporting multi-document transaction https://www.mongodb.com/docs/manual/core/transactions/
+        throw new SkipException("TODO");
     }
 
     private void assertOneNotNullResult(String query)
