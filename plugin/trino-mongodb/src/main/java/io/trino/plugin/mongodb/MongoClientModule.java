@@ -21,8 +21,6 @@ import com.google.inject.Singleton;
 import com.google.inject.multibindings.ProvidesIntoSet;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
-import com.mongodb.ServerApi;
-import com.mongodb.ServerApiVersion;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
@@ -79,7 +77,6 @@ public class MongoClientModule
         MongoClientSettings.Builder options = MongoClientSettings.builder();
         configurators.forEach(configurator -> configurator.configure(options));
         options.addCommandListener(MongoTelemetry.builder(openTelemetry).build().newCommandListener());
-        options.serverApi(ServerApi.builder().version(ServerApiVersion.V1).strict(false).build());
         MongoClient client = MongoClients.create(options.build());
 
         return new MongoSession(

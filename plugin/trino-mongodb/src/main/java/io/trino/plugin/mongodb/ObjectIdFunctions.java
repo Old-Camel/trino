@@ -69,8 +69,13 @@ public final class ObjectIdFunctions
     @SqlType("ObjectId")
     public static Slice timestampObjectid(@SqlType("timestamp(0) with time zone") long timestamp)
     {
-        ObjectId objectId = ObjectId.getSmallestWithDate(new Date(unpackMillisUtc(timestamp)));
+        ObjectId objectId = new ObjectId(dateToTimestampSeconds(new Date(unpackMillisUtc(timestamp))), 0);
         return Slices.wrappedBuffer(objectId.toByteArray());
+    }
+
+    private static int dateToTimestampSeconds(Date time)
+    {
+        return (int) (time.getTime() / 1000L);
     }
 
     @ScalarOperator(CAST)

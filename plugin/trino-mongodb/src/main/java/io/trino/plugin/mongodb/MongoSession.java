@@ -33,7 +33,6 @@ import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.MongoIterable;
 import com.mongodb.client.model.Collation;
-import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Updates;
 import com.mongodb.client.result.DeleteResult;
@@ -63,6 +62,7 @@ import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.TypeSignatureParameter;
 import io.trino.spi.type.VarcharType;
+import org.bson.BsonDocument;
 import org.bson.Document;
 import org.bson.types.Binary;
 import org.bson.types.Decimal128;
@@ -389,7 +389,7 @@ public class MongoSession
         schema.findOneAndReplace(new Document(TABLE_NAME_KEY, remoteTableName), metadata);
 
         database.getCollection(remoteTableName)
-                .updateMany(Filters.empty(), Updates.rename(source, target));
+                .updateMany(new BsonDocument(), Updates.rename(source, target));
 
         tableCache.invalidate(table.schemaTableName());
     }
@@ -412,7 +412,7 @@ public class MongoSession
         schema.findOneAndReplace(new Document(TABLE_NAME_KEY, remoteTableName), metadata);
 
         database.getCollection(remoteTableName)
-                .updateMany(Filters.empty(), Updates.unset(columnName));
+                .updateMany(new BsonDocument(), Updates.unset(columnName));
 
         tableCache.invalidate(table.schemaTableName());
     }
@@ -1029,7 +1029,6 @@ public class MongoSession
     {
         return client.listDatabases()
                 .nameOnly(true)
-                .authorizedDatabasesOnly(true)
                 .map(result -> result.getString("name"));
     }
 
